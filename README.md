@@ -1,16 +1,16 @@
 # ACCEL-v1: INT8 CNN Accelerator
 
-A high-performance INT8 CNN accelerator implemented with a row-stationary systolic array architecture, designed for FPGA deployment. This project demonstrates end-to-end deep learning inference acceleration from algorithm to hardware implementation.
+A complete INT8 CNN accelerator with systolic array architecture and full UART-based host interface. Includes hardware design, quantization framework, and end-to-end MNIST inference pipeline.
 
 ## Key Features
 
-- **INT8 Quantized CNN Accelerator** with systolic array compute engine
-- **Row-stationary dataflow** optimized for CNN workloads
-- **Double-buffered SRAM controller** for efficient memory access
-- **UART-based CSR interface** for host communication and control
-- **Complete MNIST CNN implementation** with training and inference
-- **Comprehensive verification** with Python golden models
-- **FPGA-ready design** with synthesis and timing closure on Cyclone V
+- **INT8 Systolic Array** with 2×2 configurable processing elements
+- **Complete UART Protocol** for host communication and control
+- **Dual-Bank Buffers** for overlapped computation and data transfer
+- **Full Packet Protocol** supporting CSR access, buffer loading, and computation control
+- **Post-Training Quantization** achieving <1% accuracy loss on MNIST
+- **Comprehensive Testing** with simulation testbenches and golden models
+- **FPGA-Ready Design** with complete Verilog implementation
 
 ## Architecture Overview
 
@@ -18,28 +18,35 @@ A high-performance INT8 CNN accelerator implemented with a row-stationary systol
 
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Host System   │◄──►│   UART Interface │◄──►│   CSR Control   │
+│   Host System   │◄──►│   UART Protocol  │◄──►│   CSR Control   │
+│  (Python/C)     │    │  Packet Handler  │    │   Registers     │
 └─────────────────┘    └──────────────────┘    └─────────────────┘
                                                          │
                                                          ▼
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
 │  Weight Buffer  │──►│  Systolic Array  │◄──►│ Activation Buf  │
-│   (INT8 Wgts)   │    │   (N×M PEs)      │    │  (INT8 Acts)    │
+│ (Dual Bank INT8)│    │  (2×2 INT8 MACs) │    │ (Dual Bank INT8)│
 └─────────────────┘    └──────────────────┘    └─────────────────┘
                                 │
                                 ▼
                        ┌─────────────────┐
-                       │ Output Pipeline │
-                       │ (Clamp/Shift)   │
+                       │    Scheduler    │
+                       │  (Tile Control) │
                        └─────────────────┘
 ```
 
-### Dataflow Architecture
-- **Weights**: Pre-quantized INT8 values streamed into weight buffer
-- **Activations**: Im2col-transformed tiles loaded as INT8 into activation buffer  
-- **Compute**: Systolic array with INT32 accumulators for high precision
-- **Post-processing**: Quantization with clamp/shift operations
-- **Output**: INT8 results returned via UART interface
+### UART Packet Protocol
+**Packet Format**: `[CMD][ADDR_L][ADDR_H][DATA_0][DATA_1][DATA_2][DATA_3]`
+
+**Commands**:
+- `0x0X`: CSR write
+- `0x1X`: CSR read  
+- `0x2X`: Activation buffer write
+- `0x3X`: Weight buffer write
+- `0x4X`: Output buffer read
+- `0x5X`: Start computation
+- `0x6X`: Abort computation
+- `0x7X`: Status query
 
 ## Project Structure
 

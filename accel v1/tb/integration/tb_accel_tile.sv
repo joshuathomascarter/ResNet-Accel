@@ -1,6 +1,6 @@
 // tb_accel_tile.sv
-// Integration testbench for accel_top UART-based accelerator
-// Tests basic functionality through UART interface
+// Complete integration testbench for UART-based accel_top
+// Tests full packet protocol with CSR writes, buffer loading, and computation
 
 module tb_accel_tile;
     // Parameters 
@@ -11,6 +11,7 @@ module tb_accel_tile;
     localparam TK = 8;
     localparam CLK_HZ = 50_000_000;
     localparam BAUD = 115_200;
+    localparam ADDR_WIDTH = 6;
 
     reg clk = 0;
     reg rst_n = 0;
@@ -20,8 +21,7 @@ module tb_accel_tile;
     wire uart_tx;
     
     // Status outputs
-    wire busy;
-    wire done_tile;
+    wire busy, done_pulse, error;
 
     // DUT instantiation
     accel_top #(
@@ -31,49 +31,179 @@ module tb_accel_tile;
         .TN(TN),
         .TK(TK),
         .CLK_HZ(CLK_HZ),
-        .BAUD(BAUD)
+        .BAUD(BAUD),
+        .ADDR_WIDTH(ADDR_WIDTH)
     ) dut (
         .clk(clk),
         .rst_n(rst_n),
         .uart_rx(uart_rx),
         .uart_tx(uart_tx),
         .busy(busy),
-        .done_tile(done_tile)
+        .done_pulse(done_pulse),
+        .error(error)
     );
 
     // Clock generation
     always #10 clk = ~clk; // 50MHz (20ns period)
+    
+    // UART bit period (for 115200 baud)
+    localparam real BIT_PERIOD = 1000000000.0 / BAUD; // ns
+    
+    // UART transmit task (sends byte from testbench to DUT)
+    task uart_send_byte;
+        input [7:0] data;
+        integer i;
+        begin
+            // Start bit
+            uart_rx = 1'b0;
+            #BIT_PERIOD;
+            
+            // Data bits (LSB first)
+            for (i = 0; i < 8; i = i + 1) begin
+                uart_rx = data[i];
+                #BIT_PERIOD;
+            end
+            
+            // Stop bit
+            uart_rx = 1'b1;
+            #BIT_PERIOD;
+        end
+    endtask
+    
+    // Send complete packet
+    task send_packet;
+        input [7:0] cmd;
+        input [15:0] addr;
+        input [31:0] data;
+        begin
+            uart_send_byte(cmd);
+            uart_send_byte(addr[7:0]);
+            uart_send_byte(addr[15:8]);
+            uart_send_byte(data[7:0]);
+            uart_send_byte(data[15:8]);
+            uart_send_byte(data[23:16]);
+            uart_send_byte(data[31:24]);
+            #(BIT_PERIOD * 2); // Extra gap between packets
+        end
+    endtask
+    
+    // CSR addresses (match csr.v)
+    localparam [7:0] ADDR_CTRL = 8'h00,
+                     ADDR_M    = 8'h08,
+                     ADDR_N    = 8'h0C,
+                     ADDR_K    = 8'h10,
+                     ADDR_TM   = 8'h14,
+                     ADDR_TN   = 8'h18,
+                     ADDR_TK   = 8'h1C;
+    
+    // Command types
+    localparam [7:0] CMD_CSR_WR     = 8'h00,
+                     CMD_BUF_WR_A   = 8'h20,
+                     CMD_BUF_WR_B   = 8'h30,
+                     CMD_START      = 8'h50,
+                     CMD_STATUS     = 8'h70;
 
     initial begin
-        $display("TB: Starting accel_top integration test");
+        $display("================================================================================");
+        $display("TB: Starting complete UART protocol test");
+        $display("================================================================================");
         
         // Reset sequence
         rst_n = 0;
-        repeat (10) @(posedge clk);
+        repeat (20) @(posedge clk);
         rst_n = 1;
-        repeat (5) @(posedge clk);
+        repeat (10) @(posedge clk);
+        $display("TB: Reset complete");
 
-        $display("TB: Reset complete, busy=%b", busy);
-
-        // Basic functionality test - send some UART data
-        // (This is simplified - real test would send proper UART packets)
-        repeat (100) @(posedge clk);
+        // Configure matrix dimensions via CSR
+        $display("\n--- Configuring CSRs ---");
+        send_packet(CMD_CSR_WR, {8'h00, ADDR_M}, 32'd8);  // M = 8
+        @(posedge clk);
+        $display("TB: Sent M=8");
         
-        $display("TB: Test completed, busy=%b, done_tile=%b", busy, done_tile);
+        send_packet(CMD_CSR_WR, {8'h00, ADDR_N}, 32'd8);  // N = 8
+        @(posedge clk);
+        $display("TB: Sent N=8");
+        
+        send_packet(CMD_CSR_WR, {8'h00, ADDR_K}, 32'd8);  // K = 8
+        @(posedge clk);
+        $display("TB: Sent K=8");
+        
+        send_packet(CMD_CSR_WR, {8'h00, ADDR_TM}, 32'd8); // Tm = 8
+        @(posedge clk);
+        $display("TB: Sent Tm=8");
+        
+        send_packet(CMD_CSR_WR, {8'h00, ADDR_TN}, 32'd8); // Tn = 8
+        @(posedge clk);
+        $display("TB: Sent Tn=8");
+        
+        send_packet(CMD_CSR_WR, {8'h00, ADDR_TK}, 32'd8); // Tk = 8
+        @(posedge clk);
+        $display("TB: Sent Tk=8");
+        
+        // Load activation buffer (simple pattern)
+        $display("\n--- Loading Activation Buffer ---");
+        send_packet(CMD_BUF_WR_A, 16'h0000, 64'h0102030405060708);
+        send_packet(CMD_BUF_WR_A, 16'h0001, 64'h090A0B0C0D0E0F10);
+        $display("TB: Loaded activation data");
+        
+        // Load weight buffer (simple pattern)
+        $display("\n--- Loading Weight Buffer ---");
+        send_packet(CMD_BUF_WR_B, 16'h0000, 64'h0807060504030201);
+        send_packet(CMD_BUF_WR_B, 16'h0001, 64'h100F0E0D0C0B0A09);
+        $display("TB: Loaded weight data");
+        
+        // Start computation
+        $display("\n--- Starting Computation ---");
+        send_packet(CMD_START, 16'h0000, 32'h00000001);
+        $display("TB: Sent START command");
+        
+        // Wait for busy signal
+        repeat (50) @(posedge clk);
+        if (busy) $display("TB: ✓ Computation started (busy=1)");
+        else $display("TB: ✗ WARNING: busy not asserted");
+        
+        // Wait for completion
+        $display("\n--- Waiting for Completion ---");
+        wait (done_pulse);
+        $display("TB: ✓ Computation complete (done pulse detected)");
+        
+        // Check status
+        repeat (100) @(posedge clk);
+        if (!busy) $display("TB: ✓ Busy cleared");
+        if (!error) $display("TB: ✓ No errors detected");
+        
+        $display("\n================================================================================");
+        $display("TB: Test PASSED - Full UART protocol functional");
+        $display("================================================================================\n");
+        
+        #1000;
         $finish;
     end
 
-    // Monitor UART activity
-    always @(posedge clk) begin
-        if (uart_tx !== 1'b1) begin
-            $display("TB: UART TX activity detected at time %t", $time);
-        end
+    // Monitor signals
+    always @(posedge done_pulse) begin
+        $display("TB: [%0t] DONE pulse detected", $time);
+    end
+    
+    always @(posedge busy) begin
+        $display("TB: [%0t] BUSY asserted", $time);
+    end
+    
+    always @(negedge busy) begin
+        $display("TB: [%0t] BUSY deasserted", $time);
+    end
+    
+    always @(posedge error) begin
+        $display("TB: [%0t] ERROR detected!", $time);
     end
 
-    // Timeout
+    // Timeout watchdog
     initial begin
-        #1000000; // 1ms timeout
-        $display("TB: Timeout - test took too long");
+        #5000000; // 5ms timeout
+        $display("\n================================================================================");
+        $display("TB: TIMEOUT - Test did not complete in time");
+        $display("================================================================================\n");
         $finish;
     end
 

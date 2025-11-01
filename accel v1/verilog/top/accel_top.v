@@ -1,6 +1,6 @@
 // accel_top.v
-// Top-level integration for ACCEL-v1 systolic array accelerator
-// Integrates systolic array, buffers, scheduler, CSR, and UART modules
+// Complete UART-based ACCEL-v1 accelerator top-level
+// Full packet protocol with CSR, buffer management, and computation control
 
 `default_nettype none
 
@@ -16,20 +16,26 @@ module accel_top #(
 )(
     input  wire clk,
     input  wire rst_n,
+    
     // UART interface
     input  wire uart_rx,
     output wire uart_tx,
-    // Status LEDs or debug outputs
+    
+    // Status outputs
     output wire busy,
-    output wire done_tile
+    output wire done_pulse,
+    output wire error
 );
 
-    // Internal signals
+    // ========================================================================
+    // Internal Wiring
+    // ========================================================================
+    
+    // CSR interface
     wire csr_wen, csr_ren;
     wire [7:0] csr_addr;
     wire [31:0] csr_wdata, csr_rdata;
     wire start_pulse, abort_pulse, irq_en;
-    wire core_busy, core_done_tile_pulse;
     
     // CSR configuration outputs
     wire [31:0] M, N, K;
@@ -47,21 +53,23 @@ module accel_top #(
     wire [N_COLS*8-1:0] b_in_flat;
     wire [N_ROWS*N_COLS*32-1:0] c_out_flat;
     
-    // Buffer control signals
-    wire act_we, wgt_we;
-    wire [TM*8-1:0] act_wdata, wgt_wdata;
+    // Buffer signals
+    wire act_we, wgt_we, out_we;
+    wire [TM*8-1:0] act_wdata;
+    wire [TN*8-1:0] wgt_wdata;
+    wire [N_ROWS*N_COLS*32-1:0] out_wdata;
     wire [TM*8-1:0] a_vec;
     wire [TN*8-1:0] b_vec;
-    wire [ADDR_WIDTH-1:0] act_waddr, wgt_waddr;
+    wire [ADDR_WIDTH-1:0] act_waddr, wgt_waddr, out_waddr;
     wire [ADDR_WIDTH-1:0] act_k_idx, wgt_k_idx;
     wire act_rd_en, wgt_rd_en;
     
-    // UART data interface
+    // UART physical layer
     wire [7:0] uart_rx_data, uart_tx_data;
     wire uart_rx_valid, uart_tx_ready, uart_tx_valid;
     wire uart_rx_frm_err, uart_rx_par_err;
-
-    // Scheduler outputs
+    
+    // Scheduler signals
     wire sched_busy, sched_done_tile;
     wire [9:0] sched_m_tile, sched_n_tile;
     wire [11:0] sched_k_tile;
@@ -69,10 +77,226 @@ module accel_top #(
     wire [TK-1:0] k_idx_sched;
     wire [TM-1:0] en_mask_row;
     wire [TN-1:0] en_mask_col;
-
+    
     // Status outputs
-    assign busy = core_busy;
-    assign done_tile = core_done_tile_pulse;
+    assign busy = sched_busy;
+    assign done_pulse = sched_done_tile;
+    assign error = uart_rx_frm_err | uart_rx_par_err;
+
+    // ========================================================================
+    // UART Packet Protocol Handler
+    // ========================================================================
+    // Packet format: [CMD][ADDR_L][ADDR_H][DATA_0][DATA_1][DATA_2][DATA_3]
+    // CMD byte encoding:
+    //   [7:4] = command type: 0x0=CSR_WR, 0x1=CSR_RD, 0x2=BUF_WR_A, 0x3=BUF_WR_B, 
+    //           0x4=BUF_RD_OUT, 0x5=START, 0x6=ABORT
+    //   [3:0] = sub-command or flags
+    
+    localparam [3:0] CMD_CSR_WR     = 4'h0,
+                     CMD_CSR_RD     = 4'h1,
+                     CMD_BUF_WR_A   = 4'h2,
+                     CMD_BUF_WR_B   = 4'h3,
+                     CMD_BUF_RD_OUT = 4'h4,
+                     CMD_START      = 4'h5,
+                     CMD_ABORT      = 4'h6,
+                     CMD_STATUS     = 4'h7;
+    
+    // UART packet receiver state machine
+    localparam [2:0] RX_IDLE   = 3'd0,
+                     RX_CMD    = 3'd1,
+                     RX_ADDR_L = 3'd2,
+                     RX_ADDR_H = 3'd3,
+                     RX_DATA0  = 3'd4,
+                     RX_DATA1  = 3'd5,
+                     RX_DATA2  = 3'd6,
+                     RX_DATA3  = 3'd7;
+    
+    reg [2:0] rx_state;
+    reg [7:0] rx_cmd;
+    reg [15:0] rx_addr;
+    reg [31:0] rx_data;
+    reg rx_valid;
+    
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            rx_state <= RX_IDLE;
+            rx_cmd <= 8'h0;
+            rx_addr <= 16'h0;
+            rx_data <= 32'h0;
+            rx_valid <= 1'b0;
+        end else begin
+            rx_valid <= 1'b0; // Pulse output
+            
+            if (uart_rx_valid) begin
+                case (rx_state)
+                    RX_IDLE: begin
+                        rx_cmd <= uart_rx_data;
+                        rx_state <= RX_CMD;
+                    end
+                    RX_CMD: begin
+                        rx_addr[7:0] <= uart_rx_data;
+                        rx_state <= RX_ADDR_L;
+                    end
+                    RX_ADDR_L: begin
+                        rx_addr[15:8] <= uart_rx_data;
+                        rx_state <= RX_ADDR_H;
+                    end
+                    RX_ADDR_H: begin
+                        rx_data[7:0] <= uart_rx_data;
+                        rx_state <= RX_DATA0;
+                    end
+                    RX_DATA0: begin
+                        rx_data[15:8] <= uart_rx_data;
+                        rx_state <= RX_DATA1;
+                    end
+                    RX_DATA1: begin
+                        rx_data[23:16] <= uart_rx_data;
+                        rx_state <= RX_DATA2;
+                    end
+                    RX_DATA2: begin
+                        rx_data[31:24] <= uart_rx_data;
+                        rx_state <= RX_DATA3;
+                    end
+                    RX_DATA3: begin
+                        rx_valid <= 1'b1;
+                        rx_state <= RX_IDLE;
+                    end
+                    default: rx_state <= RX_IDLE;
+                endcase
+            end
+        end
+    end
+    
+    // Command decoder
+    wire [3:0] cmd_type = rx_cmd[7:4];
+    wire cmd_is_csr_wr     = rx_valid && (cmd_type == CMD_CSR_WR);
+    wire cmd_is_csr_rd     = rx_valid && (cmd_type == CMD_CSR_RD);
+    wire cmd_is_buf_wr_a   = rx_valid && (cmd_type == CMD_BUF_WR_A);
+    wire cmd_is_buf_wr_b   = rx_valid && (cmd_type == CMD_BUF_WR_B);
+    wire cmd_is_buf_rd_out = rx_valid && (cmd_type == CMD_BUF_RD_OUT);
+    wire cmd_is_start      = rx_valid && (cmd_type == CMD_START);
+    wire cmd_is_abort      = rx_valid && (cmd_type == CMD_ABORT);
+    wire cmd_is_status     = rx_valid && (cmd_type == CMD_STATUS);
+    
+    // CSR interface
+    assign csr_wen = cmd_is_csr_wr;
+    assign csr_ren = cmd_is_csr_rd;
+    assign csr_addr = rx_addr[7:0];
+    assign csr_wdata = rx_data;
+    
+    // Buffer write control
+    reg [TM*8-1:0] act_wdata_r;
+    reg [TN*8-1:0] wgt_wdata_r;
+    reg [ADDR_WIDTH-1:0] act_waddr_r, wgt_waddr_r;
+    reg act_we_r, wgt_we_r;
+    
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            act_we_r <= 1'b0;
+            wgt_we_r <= 1'b0;
+            act_waddr_r <= {ADDR_WIDTH{1'b0}};
+            wgt_waddr_r <= {ADDR_WIDTH{1'b0}};
+            act_wdata_r <= {TM*8{1'b0}};
+            wgt_wdata_r <= {TN*8{1'b0}};
+        end else begin
+            // Default: disable writes
+            act_we_r <= 1'b0;
+            wgt_we_r <= 1'b0;
+            
+            if (cmd_is_buf_wr_a) begin
+                act_we_r <= 1'b1;
+                act_waddr_r <= rx_addr[ADDR_WIDTH-1:0];
+                act_wdata_r <= rx_data[TM*8-1:0];
+            end
+            
+            if (cmd_is_buf_wr_b) begin
+                wgt_we_r <= 1'b1;
+                wgt_waddr_r <= rx_addr[ADDR_WIDTH-1:0];
+                wgt_wdata_r <= rx_data[TN*8-1:0];
+            end
+        end
+    end
+    
+    assign act_we = act_we_r;
+    assign wgt_we = wgt_we_r;
+    assign act_waddr = act_waddr_r;
+    assign wgt_waddr = wgt_waddr_r;
+    assign act_wdata = act_wdata_r;
+    assign wgt_wdata = wgt_wdata_r;
+    
+    // UART transmit response handler
+    localparam [1:0] TX_IDLE    = 2'd0,
+                     TX_HEADER  = 2'd1,
+                     TX_DATA    = 2'd2,
+                     TX_WAIT    = 2'd3;
+    
+    reg [1:0] tx_state;
+    reg [2:0] tx_byte_count;
+    reg [31:0] tx_data_reg;
+    reg [7:0] tx_cmd_reg;
+    reg tx_active;
+    
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            tx_state <= TX_IDLE;
+            tx_byte_count <= 3'd0;
+            tx_data_reg <= 32'h0;
+            tx_cmd_reg <= 8'h0;
+            tx_active <= 1'b0;
+        end else begin
+            case (tx_state)
+                TX_IDLE: begin
+                    if (cmd_is_csr_rd || cmd_is_status) begin
+                        tx_cmd_reg <= rx_cmd;
+                        tx_data_reg <= (cmd_is_status) ? {30'h0, error, busy} : csr_rdata;
+                        tx_byte_count <= 3'd0;
+                        tx_state <= TX_HEADER;
+                        tx_active <= 1'b1;
+                    end else if (cmd_is_buf_rd_out) begin
+                        tx_cmd_reg <= rx_cmd;
+                        tx_data_reg <= c_out_flat[31:0]; // Return first word
+                        tx_byte_count <= 3'd0;
+                        tx_state <= TX_HEADER;
+                        tx_active <= 1'b1;
+                    end
+                end
+                
+                TX_HEADER: begin
+                    if (uart_tx_ready) begin
+                        tx_state <= TX_DATA;
+                    end
+                end
+                
+                TX_DATA: begin
+                    if (uart_tx_ready) begin
+                        tx_byte_count <= tx_byte_count + 1'b1;
+                        if (tx_byte_count == 3'd3) begin
+                            tx_state <= TX_WAIT;
+                            tx_active <= 1'b0;
+                        end
+                    end
+                end
+                
+                TX_WAIT: begin
+                    tx_state <= TX_IDLE;
+                end
+                
+                default: tx_state <= TX_IDLE;
+            endcase
+        end
+    end
+    
+    assign uart_tx_valid = tx_active && (tx_state == TX_HEADER || tx_state == TX_DATA);
+    assign uart_tx_data = (tx_state == TX_HEADER) ? tx_cmd_reg :
+                         (tx_byte_count == 3'd0) ? tx_data_reg[7:0] :
+                         (tx_byte_count == 3'd1) ? tx_data_reg[15:8] :
+                         (tx_byte_count == 3'd2) ? tx_data_reg[23:16] :
+                         tx_data_reg[31:24];
+
+    // ========================================================================
+    // Hardware Module Instantiations
+    // ========================================================================
+
 
     // CSR (Control/Status Register) module
     csr #(
@@ -85,8 +309,8 @@ module accel_top #(
         .csr_addr(csr_addr),
         .csr_wdata(csr_wdata),
         .csr_rdata(csr_rdata),
-        .core_busy(core_busy),
-        .core_done_tile_pulse(core_done_tile_pulse),
+        .core_busy(sched_busy),
+        .core_done_tile_pulse(sched_done_tile),
         .core_bank_sel_rd_A(bank_sel_rd_A),
         .core_bank_sel_rd_B(bank_sel_rd_B),
         .rx_crc_error(uart_rx_par_err),
@@ -97,9 +321,12 @@ module accel_top #(
         .M(M), .N(N), .K(K),
         .Tm(Tm), .Tn(Tn), .Tk(Tk),
         .m_idx(m_idx), .n_idx(n_idx), .k_idx(k_idx),
-        .bank_sel_wr_A(bank_sel_wr_A), .bank_sel_wr_B(bank_sel_wr_B),
-        .bank_sel_rd_A(bank_sel_rd_A), .bank_sel_rd_B(bank_sel_rd_B),
-        .Sa_bits(Sa_bits), .Sw_bits(Sw_bits),
+        .bank_sel_wr_A(bank_sel_wr_A), 
+        .bank_sel_wr_B(bank_sel_wr_B),
+        .bank_sel_rd_A(bank_sel_rd_A), 
+        .bank_sel_rd_B(bank_sel_rd_B),
+        .Sa_bits(Sa_bits), 
+        .Sw_bits(Sw_bits),
         .uart_len_max(uart_len_max),
         .uart_crc_en(uart_crc_en)
     );
@@ -137,7 +364,7 @@ module accel_top #(
         .a_vec(a_vec)
     );
 
-    // Weight Buffer  
+    // Weight Buffer
     wgt_buffer #(
         .TN(TN),
         .ADDR_WIDTH(ADDR_WIDTH)
@@ -167,24 +394,21 @@ module accel_top #(
     ) scheduler_inst (
         .clk(clk),
         .rst_n(rst_n),
-        // CSR interface 
-        .start(start_pulse),
-        .abort(abort_pulse),
+        .start(start_pulse | cmd_is_start),
+        .abort(abort_pulse | cmd_is_abort),
         .M(M[9:0]),
         .N(N[9:0]),
         .K(K[11:0]),
         .Tm(Tm[5:0]),
         .Tn(Tn[5:0]),
         .Tk(Tk[5:0]),
-        .MT_csr(10'd1),  // Simplified - should come from CSR
-        .NT_csr(10'd1),
-        .KT_csr(12'd1),
-        // Bank readiness (simplified)
+        .MT_csr((M[9:0] != 0) ? ((M[9:0] + Tm[5:0] - 10'd1) / Tm[5:0]) : 10'd1),
+        .NT_csr((N[9:0] != 0) ? ((N[9:0] + Tn[5:0] - 10'd1) / Tn[5:0]) : 10'd1),
+        .KT_csr((K[11:0] != 0) ? ((K[11:0] + Tk[5:0] - 12'd1) / Tk[5:0]) : 12'd1),
         .valid_A_ping(1'b1),
         .valid_A_pong(1'b1),
         .valid_B_ping(1'b1),
         .valid_B_pong(1'b1),
-        // Status outputs
         .busy(sched_busy),
         .done_tile(sched_done_tile),
         .m_tile(sched_m_tile),
@@ -192,8 +416,7 @@ module accel_top #(
         .k_tile(sched_k_tile),
         .cycles_tile(cycles_tile),
         .stall_cycles(stall_cycles),
-        // Buffer/Array control
-        .rd_en(act_rd_en),  // Same for both buffers
+        .rd_en(act_rd_en),
         .k_idx(k_idx_sched),
         .bank_sel_rd_A(bank_sel_rd_A),
         .bank_sel_rd_B(bank_sel_rd_B),
@@ -224,7 +447,7 @@ module accel_top #(
         .o_par_err(uart_rx_par_err)
     );
 
-    // UART TX  
+    // UART TX
     uart_tx #(
         .DATA_BITS(8),
         .CLK_HZ(CLK_HZ),
@@ -242,35 +465,23 @@ module accel_top #(
         .i_ready(uart_tx_ready),
         .o_tx(uart_tx)
     );
-
-    // Signal assignments and connections
-    assign core_busy = sched_busy;
-    assign core_done_tile_pulse = sched_done_tile;
     
-    // Connect systolic array inputs (map from buffer outputs to array size)
+    // ========================================================================
+    // Internal Connections
+    // ========================================================================
+    
+    // Connect systolic array inputs
     assign a_in_flat = a_vec[N_ROWS*8-1:0];
     assign b_in_flat = b_vec[N_COLS*8-1:0];
     
-    // Buffer controls
-    assign wgt_rd_en = act_rd_en;  // Same read enable for both buffers
+    // Buffer read controls
+    assign wgt_rd_en = act_rd_en;
     assign act_k_idx = k_idx_sched[ADDR_WIDTH-1:0];
     assign wgt_k_idx = k_idx_sched[ADDR_WIDTH-1:0];
 
-    // UART protocol handler (simplified - needs proper packet handling)
-    assign csr_wen = uart_rx_valid;
-    assign csr_ren = 1'b0;
-    assign csr_addr = uart_rx_data;
-    assign csr_wdata = {24'b0, uart_rx_data};
-    assign uart_tx_data = csr_rdata[7:0];
-    assign uart_tx_valid = 1'b0; // Simplified - needs proper response logic
+endmodule
 
-    // Buffer write controls (simplified - needs proper UART data handling)
-    assign act_we = 1'b0;
-    assign wgt_we = 1'b0;
-    assign act_wdata = {TM*8{1'b0}};
-    assign wgt_wdata = {TN*8{1'b0}};
-    assign act_waddr = {ADDR_WIDTH{1'b0}};
-    assign wgt_waddr = {ADDR_WIDTH{1'b0}};
+`default_nettype wire
 
 endmodule
 
