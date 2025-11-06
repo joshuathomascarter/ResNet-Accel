@@ -43,18 +43,21 @@ module perf #(
     localparam S_MEASURING = 1'b1;
 
     reg state_reg, state_next;
+    reg prev_state;
 
     // Internal counters
     reg [COUNTER_WIDTH-1:0] total_counter;
     reg [COUNTER_WIDTH-1:0] active_counter;
     reg [COUNTER_WIDTH-1:0] idle_counter;
 
-    // FSM State Register
+    // State Register
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state_reg <= S_IDLE;
+            state_reg  <= S_IDLE;
+            prev_state <= S_IDLE;
         end else begin
-            state_reg <= state_next;
+            prev_state <= state_reg;
+            state_reg  <= state_next;
         end
     end
 
@@ -108,17 +111,12 @@ module perf #(
             idle_cycles_count   <= {COUNTER_WIDTH{1'b0}};
             measurement_done    <= 1'b0;
         end else begin
-            // Latch final counts and pulse 'measurement_done' when operation finishes
-            if (state_reg == S_MEASURING && done_pulse) begin
-                total_cycles_count  <= total_counter + 1; // Add 1 to include the final cycle
-                if (busy_signal) begin
-                    active_cycles_count <= active_counter + 1;
-                    idle_cycles_count   <= idle_counter;
-                end else begin
-                    active_cycles_count <= active_counter;
-                    idle_cycles_count   <= idle_counter + 1;
-                end
-                measurement_done <= 1'b1;
+            // Latch final counts when transitioning from MEASURING to IDLE
+            if (prev_state == S_MEASURING && state_reg == S_IDLE) begin
+                total_cycles_count  <= total_counter;
+                active_cycles_count <= active_counter;
+                idle_cycles_count   <= idle_counter;
+                measurement_done    <= 1'b1;
             end else begin
                 measurement_done <= 1'b0;
             end
