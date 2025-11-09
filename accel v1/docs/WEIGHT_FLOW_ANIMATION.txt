@@ -1,0 +1,267 @@
+================================================================================
+ROW-STATIONARY WEIGHT FLOW: CYCLE-BY-CYCLE ANIMATION
+================================================================================
+2x2 Systolic Array Example: M=2, N=2, K=4
+
+NOTATION:
+  PE[r,c] = Processing Element at row r, column c
+  W[c,k]  = Weight for column c, K-index k
+  A[r,k]  = Activation for row r, K-index k
+  →       = Data flows right (activations only)
+  ↓       = Broadcast down (weights during load phase only)
+  [XX]    = Stored in register (stationary)
+
+================================================================================
+PHASE 1: WEIGHT LOADING (S_LOAD_WEIGHT state, load_weight=1)
+================================================================================
+
+CYCLE 0: Load k=0 weights
+────────────────────────────────────────────────────────────────────────────
+Weight Buffer outputs: k_idx=0
+    b_vec = [... W[1,0] W[0,0]]
+                   ↓      ↓
+               col1    col0
+
+Systolic Array:
+                col0          col1
+                 ↓             ↓
+              W[0,0]        W[1,0]
+                 ↓             ↓
+row0 →    PE[0,0]        PE[0,1]
+          weight_reg      weight_reg
+          captures:       captures:
+          [W[0,0]]        [W[1,0]]
+
+row1 →    PE[1,0]        PE[1,1]
+          weight_reg      weight_reg
+          captures:       captures:
+          [W[0,0]]        [W[1,0]]
+          (SAME!)         (SAME!)
+
+BROADCAST: Both PEs in col0 get W[0,0], both in col1 get W[1,0]
+
+
+CYCLE 1: Load k=1 weights
+────────────────────────────────────────────────────────────────────────────
+Weight Buffer outputs: k_idx=1
+    b_vec = [... W[1,1] W[0,1]]
+                   ↓      ↓
+               col1    col0
+
+Systolic Array:
+                col0          col1
+                 ↓             ↓
+              W[0,1]        W[1,1]
+                 ↓             ↓
+row0 →    PE[0,0]        PE[0,1]
+          OVERWRITE       OVERWRITE
+          [W[0,1]]        [W[1,1]]
+          was W[0,0]      was W[1,0]
+
+row1 →    PE[1,0]        PE[1,1]
+          OVERWRITE       OVERWRITE
+          [W[0,1]]        [W[1,1]]
+          was W[0,0]      was W[1,0]
+
+
+CYCLE 2: Load k=2 weights
+────────────────────────────────────────────────────────────────────────────
+Weight Buffer outputs: k_idx=2
+    b_vec = [... W[1,2] W[0,2]]
+
+Systolic Array:
+row0 →    PE[0,0]        PE[0,1]
+          [W[0,2]]        [W[1,2]]
+
+row1 →    PE[1,0]        PE[1,1]
+          [W[0,2]]        [W[1,2]]
+
+
+CYCLE 3: Load k=3 weights (FINAL)
+────────────────────────────────────────────────────────────────────────────
+Weight Buffer outputs: k_idx=3
+    b_vec = [... W[1,3] W[0,3]]
+
+Systolic Array:
+row0 →    PE[0,0]        PE[0,1]
+          [W[0,3]]        [W[1,3]]
+           FINAL!          FINAL!
+
+row1 →    PE[1,0]        PE[1,1]
+          [W[0,3]]        [W[1,3]]
+           FINAL!          FINAL!
+
+>>> WEIGHT LOADING COMPLETE <<<
+>>> Weights are now STATIONARY in PE registers <<<
+>>> Scheduler transitions to S_STREAM_K <<<
+
+
+================================================================================
+PHASE 2: ACTIVATION STREAMING (S_STREAM_K state, load_weight=0)
+================================================================================
+Weight registers NO LONGER UPDATE - they hold their values!
+Activations flow horizontally, MACs compute with stored weights.
+
+CYCLE 0: Stream k=0 activations
+────────────────────────────────────────────────────────────────────────────
+Activation Buffer outputs: k_idx=0
+    a_vec = [A[1,0] A[0,0]]
+               ↓      ↓
+            row1   row0
+
+Systolic Array (weights FROZEN in registers):
+
+            col0          col1
+            
+A[0,0] → PE[0,0] ────→ PE[0,1]
+         │              │
+         MAC:           MAC:
+         A[0,0] *       A[0,0] *
+         [W[0,3]] ←─┐   [W[1,3]] ←─┐
+            ↓       │      ↓       │
+         acc[0,0]   │   acc[0,1]   │
+          += result │    += result │
+                    │              │
+         weight_reg │   weight_reg │
+         UNCHANGED! │   UNCHANGED! │
+                    └──────────────┘
+                    STATIONARY!
+
+A[1,0] → PE[1,0] ────→ PE[1,1]
+         │              │
+         MAC:           MAC:
+         A[1,0] *       A[1,0] *
+         [W[0,3]]       [W[1,3]]
+            ↓              ↓
+         acc[1,0]       acc[1,1]
+          += result      += result
+
+
+CYCLE 1: Stream k=1 activations
+────────────────────────────────────────────────────────────────────────────
+Activation Buffer outputs: k_idx=1
+    a_vec = [A[1,1] A[0,1]]
+
+Systolic Array:
+
+A[0,1] → PE[0,0] ────→ PE[0,1]
+         │              │
+         MAC:           MAC:
+         A[0,1] *       A[0,1] *
+         [W[0,3]] ←─┐   [W[1,3]] ←─┐
+            ↓       │      ↓       │
+         acc[0,0]   │   acc[0,1]   │
+          += result │    += result │
+                    │              │
+         SAME WEIGHT!   SAME WEIGHT!
+         from Cycle 0   from Cycle 0
+
+A[1,1] → PE[1,0] ────→ PE[1,1]
+         MAC:           MAC:
+         A[1,1] *       A[1,1] *
+         [W[0,3]]       [W[1,3]]
+            ↓              ↓
+         acc[1,0]       acc[1,1]
+          += result      += result
+
+
+CYCLE 2: Stream k=2 activations
+────────────────────────────────────────────────────────────────────────────
+A[0,2] → PE[0,0]: acc[0,0] += A[0,2] * [W[0,3]]  ← STILL W[0,3]!
+A[1,2] → PE[1,0]: acc[1,0] += A[1,2] * [W[0,3]]
+         ...flows to column 1 PEs with W[1,3]...
+
+
+CYCLE 3: Stream k=3 activations (FINAL)
+────────────────────────────────────────────────────────────────────────────
+A[0,3] → PE[0,0]: acc[0,0] += A[0,3] * [W[0,3]]
+A[1,3] → PE[1,0]: acc[1,0] += A[1,3] * [W[0,3]]
+         ...flows to column 1 PEs with W[1,3]...
+
+>>> TILE COMPLETE <<<
+>>> Each acc[r,c] contains sum over K=4 products <<<
+
+
+================================================================================
+FINAL ACCUMULATOR VALUES
+================================================================================
+
+PE[0,0]: acc[0,0] = A[0,0]*W[0,3] + A[0,1]*W[0,3] + A[0,2]*W[0,3] + A[0,3]*W[0,3]
+                  = (A[0,0] + A[0,1] + A[0,2] + A[0,3]) * W[0,3]
+                  = dot_product(A[row=0,:], W[col=0,3])
+
+PE[1,0]: acc[1,0] = A[1,0]*W[0,3] + A[1,1]*W[0,3] + A[1,2]*W[0,3] + A[1,3]*W[0,3]
+                  = (A[1,0] + A[1,1] + A[1,2] + A[1,3]) * W[0,3]
+                  = dot_product(A[row=1,:], W[col=0,3])
+
+PE[0,1]: acc[0,1] = A[0,0]*W[1,3] + A[0,1]*W[1,3] + A[0,2]*W[1,3] + A[0,3]*W[1,3]
+                  = (A[0,0] + A[0,1] + A[0,2] + A[0,3]) * W[1,3]
+                  = dot_product(A[row=0,:], W[col=1,3])
+
+PE[1,1]: acc[1,1] = A[1,0]*W[1,3] + A[1,1]*W[1,3] + A[1,2]*W[1,3] + A[1,3]*W[1,3]
+                  = (A[1,0] + A[1,1] + A[1,2] + A[1,3]) * W[1,3]
+                  = dot_product(A[row=1,:], W[col=1,3])
+
+
+================================================================================
+KEY OBSERVATIONS
+================================================================================
+
+1. WEIGHTS NEVER FLOW BETWEEN PEs
+   - No b_out port on PE
+   - No b_fwd wiring in systolic_array
+   - b_in connects directly to ALL PEs in same column (broadcast)
+
+2. WEIGHT LOADING PHASE (4 cycles for K=4)
+   - Scheduler cycles k_idx through 0,1,2,3
+   - load_weight=1 throughout
+   - Each PE captures weight into weight_reg
+   - PEs OVERWRITE weight_reg each cycle
+   - Only LAST weight (k=K-1) matters for final result
+
+3. ACTIVATION STREAMING PHASE (4 cycles for K=4)
+   - Scheduler cycles k_idx through 0,1,2,3 AGAIN
+   - load_weight=0 throughout
+   - weight_reg NEVER CHANGES
+   - Activations flow horizontally
+   - MACs accumulate with CONSTANT weight
+
+4. WEIGHT REUSE
+   - Each weight loaded ONCE
+   - Used M times (once per row in the column)
+   - For 2x2 array: each weight used 2 times
+   - For 8x8 array: each weight used 8 times
+   - This is the efficiency gain of row-stationary!
+
+5. WHY LOAD ALL K WEIGHTS?
+   - Actually, we only USE the LAST weight (k=K-1)!
+   - This is a current limitation/inefficiency
+   - Could optimize: load ONLY k=K-1 in one cycle
+   - OR: modify to use ALL K weights (requires different dataflow)
+   - Current design: for completeness and future flexibility
+
+================================================================================
+COMPARISON: ROW-STATIONARY vs WEIGHT-STATIONARY vs OUTPUT-STATIONARY
+================================================================================
+
+ROW-STATIONARY (our design):
+  ✓ Weights load once, stay in PE registers
+  ✓ Activations flow horizontally
+  ✓ Each weight reused M times (across rows)
+  ✓ Maximizes weight reuse for CNN workloads
+
+WEIGHT-STATIONARY (alternative):
+  - Weights loaded and stay throughout ENTIRE tile
+  - Activations flow both horizontally AND vertically
+  - Each weight reused M×N times
+  - More complex control
+
+OUTPUT-STATIONARY (alternative):
+  - Partial sums stay in PEs
+  - Both activations and weights flow
+  - Maximizes reuse of partial sums
+  - Used in TPU-style designs
+
+Our choice: Row-stationary balances reuse efficiency with control complexity.
+
+================================================================================
