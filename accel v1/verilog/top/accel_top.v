@@ -340,7 +340,168 @@ module accel_top #(
         .perf_idle_cycles(perf_idle_cycles)
     );
 
-    // Systolic Array
+    // ========================================================================
+    // SPARSE ACCELERATION MODULES (BSR Format)
+    // ========================================================================
+    
+    // BSR Scheduler signals
+    wire bsr_start, bsr_done, bsr_busy;
+    wire [15:0] bsr_num_block_rows, bsr_num_block_cols;
+    wire [31:0] bsr_total_blocks;
+    wire bsr_layer_switch;
+    wire [2:0] bsr_active_layer;
+    wire bsr_layer_ready;
+    
+    // BSR Metadata BRAMs (row_ptr, col_idx)
+    wire row_ptr_rd_en;
+    wire [15:0] row_ptr_rd_addr;
+    wire [31:0] row_ptr_rd_data;
+    wire col_idx_rd_en;
+    wire [31:0] col_idx_rd_addr;
+    wire [15:0] col_idx_rd_data;
+    
+    // Block data BRAM
+    wire block_rd_en;
+    wire [31:0] block_rd_addr;
+    wire [7:0] block_rd_data;
+    
+    // Scheduler to Sparse Systolic interface
+    wire systolic_sparse_valid, systolic_sparse_ready, systolic_sparse_done;
+    wire [7:0] systolic_sparse_block [0:63]; // 8×8 block
+    wire [15:0] systolic_sparse_block_row, systolic_sparse_block_col;
+    
+    // Sparse Systolic to Reorder Buffer
+    wire reorder_in_valid, reorder_in_row_done;
+    wire [15:0] reorder_in_block_col;
+    wire [31:0] reorder_in_block_idx;
+    wire reorder_out_valid, reorder_out_row_done;
+    wire [15:0] reorder_out_block_col;
+    wire [31:0] reorder_out_block_idx;
+    
+    // Activation input for sparse systolic (8 INT8 values)
+    wire [7:0] sparse_act_data [0:7];
+    wire sparse_act_valid;
+    
+    // Sparse systolic result (2×8 INT32 results for 2×2 PEs)
+    wire sparse_result_valid;
+    wire [31:0] sparse_result_data [0:1][0:7]; // 2 rows × 8 columns
+    wire [15:0] sparse_result_block_row, sparse_result_block_col;
+    wire sparse_result_ready;
+    
+    // Assign BSR config from CSR (add these CSR addresses in csr.v)
+    assign bsr_num_block_rows = M[15:0] >> 3;  // M/8 for 8×8 blocks
+    assign bsr_num_block_cols = N[15:0] >> 3;  // N/8
+    assign bsr_total_blocks = K[31:0];          // Reuse K as total blocks
+    assign bsr_start = start_pulse;
+    assign bsr_layer_switch = 1'b0;  // Static for now, add CSR bit later
+    assign bsr_active_layer = 3'd0;   // Layer 0 by default
+    
+    // Connect activations from act_buffer to sparse systolic
+    // For now, direct wire - add proper scheduling later
+    assign sparse_act_valid = act_rd_en;
+    genvar act_i;
+    generate
+        for (act_i = 0; act_i < 8; act_i = act_i + 1) begin : gen_sparse_act
+            assign sparse_act_data[act_i] = a_vec[act_i*8 +: 8];
+        end
+    endgenerate
+    
+    // BSR Scheduler (traverses sparse blocks)
+    bsr_scheduler #(
+        .BLOCK_H(8),
+        .BLOCK_W(8),
+        .BLOCK_SIZE(64),
+        .MAX_BLOCK_ROWS(256),
+        .MAX_BLOCKS(65536),
+        .DATA_WIDTH(8)
+    ) bsr_scheduler_inst (
+        .clk(clk),
+        .rst_n(rst_n),
+        .start(bsr_start),
+        .cfg_num_block_rows(bsr_num_block_rows),
+        .cfg_num_block_cols(bsr_num_block_cols),
+        .cfg_total_blocks(bsr_total_blocks),
+        .cfg_layer_switch(bsr_layer_switch),
+        .cfg_active_layer(bsr_active_layer),
+        .cfg_layer_ready(bsr_layer_ready),
+        .row_ptr_rd_en(row_ptr_rd_en),
+        .row_ptr_rd_addr(row_ptr_rd_addr),
+        .row_ptr_rd_data(row_ptr_rd_data),
+        .col_idx_rd_en(col_idx_rd_en),
+        .col_idx_rd_addr(col_idx_rd_addr),
+        .col_idx_rd_data(col_idx_rd_data),
+        .block_rd_en(block_rd_en),
+        .block_rd_addr(block_rd_addr),
+        .block_rd_data(block_rd_data),
+        .systolic_valid(systolic_sparse_valid),
+        .systolic_block(systolic_sparse_block),
+        .systolic_block_row(systolic_sparse_block_row),
+        .systolic_block_col(systolic_sparse_block_col),
+        .systolic_ready(systolic_sparse_ready),
+        .systolic_done(systolic_sparse_done),
+        .done(bsr_done),
+        .busy(bsr_busy),
+        .blocks_processed()  // Monitor in perf module
+    );
+    
+    // Sparse Systolic Array Wrapper (processes 8×8 blocks with 2×2 PEs)
+    systolic_array_sparse #(
+        .PE_ROWS(2),
+        .PE_COLS(2),
+        .DATA_WIDTH(8),
+        .ACC_WIDTH(32),
+        .BLOCK_H(8),
+        .BLOCK_W(8)
+    ) systolic_sparse_inst (
+        .clk(clk),
+        .rst_n(rst_n),
+        .valid_in(systolic_sparse_valid),
+        .block_data(systolic_sparse_block),
+        .block_row(systolic_sparse_block_row),
+        .block_col(systolic_sparse_block_col),
+        .ready(systolic_sparse_ready),
+        .act_data(sparse_act_data),
+        .act_valid(sparse_act_valid),
+        .result_valid(sparse_result_valid),
+        .result_data(sparse_result_data),
+        .result_block_row(sparse_result_block_row),
+        .result_block_col(sparse_result_block_col),
+        .result_ready(sparse_result_ready),
+        .done(systolic_sparse_done),
+        .busy()  // Monitor in perf module
+    );
+    
+    // Block Reorder Buffer (sorts blocks by column for correct GEMM order)
+    block_reorder_buffer #(
+        .MAX_BLOCKS_PER_ROW(128)
+    ) reorder_buffer_inst (
+        .clk(clk),
+        .rst_n(rst_n),
+        .in_valid(sparse_result_valid),
+        .in_block_col(sparse_result_block_col),
+        .in_block_idx({16'h0, sparse_result_block_row}),  // Use row as idx for now
+        .in_row_done(systolic_sparse_done),
+        .out_valid(reorder_out_valid),
+        .out_block_col(reorder_out_block_col),
+        .out_block_idx(reorder_out_block_idx),
+        .out_row_done(reorder_out_row_done)
+    );
+    
+    // TODO: Add multi_layer_buffer instantiation for multi-layer neural networks
+    // TODO: Add BSR metadata BRAMs (row_ptr, col_idx, blocks) - currently stubbed
+    
+    // Stub: BSR Metadata BRAMs (replace with actual BRAM instantiations)
+    assign row_ptr_rd_data = 32'h0;  // TODO: Connect to BRAM
+    assign col_idx_rd_data = 16'h0;  // TODO: Connect to BRAM
+    assign block_rd_data = 8'h0;     // TODO: Connect to BRAM
+    
+    // Result ready signal (for now, always ready - add backpressure later)
+    assign sparse_result_ready = 1'b1;
+    
+    // ========================================================================
+    // LEGACY DENSE SYSTOLIC ARRAY (Keep for backward compatibility)
+    // ========================================================================
+    // Systolic Array (Dense mode - can be disabled if only using sparse)
     systolic_array #(
         .N_ROWS(N_ROWS),
         .N_COLS(N_COLS),
