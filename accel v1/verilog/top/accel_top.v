@@ -21,6 +21,33 @@ module accel_top #(
     input  wire uart_rx,
     output wire uart_tx,
     
+    // AXI4-Lite Host Interface (Phase 4)
+    input  wire [31:0] s_axi_awaddr,
+    input  wire [1:0]  s_axi_awburst,
+    input  wire [7:0]  s_axi_awlen,
+    input  wire [2:0]  s_axi_awsize,
+    input  wire        s_axi_awvalid,
+    output wire        s_axi_awready,
+    input  wire [31:0] s_axi_wdata,
+    input  wire [3:0]  s_axi_wstrb,
+    input  wire        s_axi_wlast,
+    input  wire        s_axi_wvalid,
+    output wire        s_axi_wready,
+    output wire [1:0]  s_axi_bresp,
+    output wire        s_axi_bvalid,
+    input  wire        s_axi_bready,
+    input  wire [31:0] s_axi_araddr,
+    input  wire [1:0]  s_axi_arburst,
+    input  wire [7:0]  s_axi_arlen,
+    input  wire [2:0]  s_axi_arsize,
+    input  wire        s_axi_arvalid,
+    output wire        s_axi_arready,
+    output wire [31:0] s_axi_rdata,
+    output wire [1:0]  s_axi_rresp,
+    output wire        s_axi_rlast,
+    output wire        s_axi_rvalid,
+    input  wire        s_axi_rready,
+    
     // Status outputs
     output wire busy,
     output wire done_pulse,
@@ -402,12 +429,13 @@ module accel_top #(
     wire [31:0] dma_row_ptr_wdata;
     
     wire dma_col_idx_we;
-    wire [31:0] dma_col_idx_waddr;
+    wire [15:0] dma_col_idx_waddr;
     wire [15:0] dma_col_idx_wdata;
     
     wire dma_block_we;
-    wire [22:0] dma_block_waddr;
-    wire [7:0] dma_block_wdata;
+    // Block write interface is now word-addressed and 32-bit wide
+    wire [20:0] dma_block_waddr;  // word address: (byte address >> 2)
+    wire [31:0] dma_block_wdata;
     
     // BSR Metadata BRAMs (row_ptr, col_idx)
     wire row_ptr_rd_en;
@@ -417,10 +445,26 @@ module accel_top #(
     wire [31:0] col_idx_rd_addr;
     wire [15:0] col_idx_rd_data;
     
-    // Block data BRAM
+    // Block data BRAM (32-bit word-addressed for DMA)
     wire block_rd_en;
-    wire [31:0] block_rd_addr;
-    wire [7:0] block_rd_data;
+    wire [31:0] block_rd_addr; // word address from scheduler
+    wire [31:0] block_rd_data; // 32-bit word
+    
+    // AXI-Lite CSR Interface
+    wire axi_csr_wen, axi_csr_ren;
+    wire [7:0] axi_csr_addr;
+    wire [31:0] axi_csr_wdata, axi_csr_rdata;
+    
+    // AXI DMA Bridge
+    wire [31:0] axi_dma_fifo_wdata;
+    wire axi_dma_fifo_wen;
+    wire axi_dma_fifo_full;
+    wire [6:0] axi_dma_fifo_count;
+    wire axi_error;
+    
+    // CSR Source Mux (UART vs AXI)
+    wire [31:0] csr_rdata_axi, csr_rdata_uart;
+    wire csr_ren_uart, csr_wen_uart, csr_ren_axi, csr_wen_axi;
     
     // Scheduler to Sparse Systolic interface
     wire systolic_sparse_valid, systolic_sparse_ready, systolic_sparse_done;
@@ -551,7 +595,8 @@ module accel_top #(
     // In real design, use FPGA BRAMs with separate read/write ports
     reg [31:0] row_ptr_mem [0:255];      // row_ptr: 256 entries × 32 bits
     reg [15:0] col_idx_mem [0:65535];   // col_idx: 64K entries × 16 bits
-    reg [7:0]  block_mem [0:4194303];   // blocks:  4M entries × 8 bits (64K blocks × 64 bytes)
+    // block_mem is now word-addressed (32-bit words)
+    reg [31:0] block_mem [0:1048575];   // 1,048,576 words = 4,194,304 bytes
     
     // row_ptr BRAM (DMA writes, scheduler reads)
     always @(posedge clk) begin
@@ -569,21 +614,98 @@ module accel_top #(
     end
     assign col_idx_rd_data = col_idx_mem[col_idx_rd_addr];
     
-    // block BRAM (DMA writes, scheduler reads)
-    // Note: block_rd_data is byte-wide, allows streaming 64-byte blocks
+    // block BRAM (32-bit word-addressed)
+    // DMA writes 32-bit words; Scheduler reads via word address
     always @(posedge clk) begin
         if (dma_block_we) begin
+            // dma_block_waddr is a word address (byte_addr >> 2)
             block_mem[dma_block_waddr] <= dma_block_wdata;
         end
     end
-    assign block_rd_data = block_mem[block_rd_addr];
+    // Scheduler reads 32-bit words directly (word-addressed)
+    assign block_rd_data = block_mem[block_rd_addr[31:2]];
     
     // Result ready signal (for now, always ready - add backpressure later)
     assign sparse_result_ready = 1'b1;
     
     // ========================================================================
-    // LEGACY DENSE SYSTOLIC ARRAY (Keep for backward compatibility)
+    // AXI4-Lite Host Interface (Phase 4)
     // ========================================================================
+    axi_lite_slave axi_slave_inst (
+        .clk(clk),
+        .rst_n(rst_n),
+        .s_axi_awaddr(s_axi_awaddr),
+        .s_axi_awburst(s_axi_awburst),
+        .s_axi_awlen(s_axi_awlen),
+        .s_axi_awsize(s_axi_awsize),
+        .s_axi_awvalid(s_axi_awvalid),
+        .s_axi_awready(s_axi_awready),
+        .s_axi_wdata(s_axi_wdata),
+        .s_axi_wstrb(s_axi_wstrb),
+        .s_axi_wlast(s_axi_wlast),
+        .s_axi_wvalid(s_axi_wvalid),
+        .s_axi_wready(s_axi_wready),
+        .s_axi_bresp(s_axi_bresp),
+        .s_axi_bvalid(s_axi_bvalid),
+        .s_axi_bready(s_axi_bready),
+        .s_axi_araddr(s_axi_araddr),
+        .s_axi_arvalid(s_axi_arvalid),
+        .s_axi_arready(s_axi_arready),
+        .s_axi_rdata(s_axi_rdata),
+        .s_axi_rresp(s_axi_rresp),
+        .s_axi_rvalid(s_axi_rvalid),
+        .s_axi_rready(s_axi_rready),
+        .csr_addr(axi_csr_addr),
+        .csr_wen(axi_csr_wen),
+        .csr_ren(axi_csr_ren),
+        .csr_wdata(axi_csr_wdata),
+        .csr_rdata(axi_csr_rdata)
+    );
+    
+    // AXI DMA Bridge (optional - for future AXI-Full burst writes)
+    // For now, kept disabled; can be enabled in Phase 4b
+    // axi_dma_bridge axi_dma_bridge_inst (
+    //     .clk(clk),
+    //     .rst_n(rst_n),
+    //     .s_axi_awaddr(s_axi_awaddr),
+    //     .s_axi_awburst(s_axi_awburst),
+    //     .s_axi_awlen(s_axi_awlen),
+    //     .s_axi_awsize(s_axi_awsize),
+    //     .s_axi_awvalid(s_axi_awvalid),
+    //     .s_axi_awready(s_axi_awready),
+    //     .s_axi_wdata(s_axi_wdata),
+    //     .s_axi_wstrb(s_axi_wstrb),
+    //     .s_axi_wlast(s_axi_wlast),
+    //     .s_axi_wvalid(s_axi_wvalid),
+    //     .s_axi_wready(s_axi_wready),
+    //     .s_axi_bresp(s_axi_bresp),
+    //     .s_axi_bvalid(s_axi_bvalid),
+    //     .s_axi_bready(s_axi_bready),
+    //     .dma_fifo_wdata(axi_dma_fifo_wdata),
+    //     .dma_fifo_wen(axi_dma_fifo_wen),
+    //     .dma_fifo_full(axi_dma_fifo_full),
+    //     .dma_fifo_count(axi_dma_fifo_count),
+    //     .axi_error(axi_error),
+    //     .words_written()
+    // );
+    
+    // ========================================================================
+    // CSR Mux: UART vs AXI Sources
+    // ========================================================================
+    // For now, UART has priority. In future, add arbitration.
+    assign csr_ren = csr_ren_uart | csr_ren_axi;
+    assign csr_wen = csr_wen_uart | csr_wen_axi;
+    assign csr_addr = csr_ren_uart ? (rx_addr[7:0]) : (axi_csr_addr);
+    assign csr_wdata = csr_wen_uart ? rx_data : axi_csr_wdata;
+    assign axi_csr_rdata = csr_rdata;
+    
+    // UART CSR access
+    assign csr_ren_uart = cmd_is_csr_rd;
+    assign csr_wen_uart = cmd_is_csr_wr;
+    
+    // AXI CSR access (mapped from AXI slave)
+    assign csr_ren_axi = axi_csr_ren;
+    assign csr_wen_axi = axi_csr_wen;
     // Systolic Array (Dense mode - can be disabled if only using sparse)
     systolic_array #(
         .N_ROWS(N_ROWS),

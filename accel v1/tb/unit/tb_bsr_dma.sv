@@ -64,13 +64,13 @@ module tb_bsr_dma;
     
     // col_idx BRAM
     wire       col_idx_we;
-    wire [31:0] col_idx_waddr;
+    wire [15:0] col_idx_waddr;
     wire [15:0] col_idx_wdata;
     
-    // block data BRAM
+    // block data BRAM (word-addressed 32-bit writes)
     wire       block_we;
-    wire [22:0] block_waddr;
-    wire [7:0] block_wdata;
+    wire [20:0] block_waddr;
+    wire [31:0] block_wdata;
     
     // Status outputs
     wire       dma_busy;
@@ -89,7 +89,7 @@ module tb_bsr_dma;
         .BLOCK_SIZE(64),
         .ROW_PTR_DEPTH(256),
         .COL_IDX_DEPTH(65536),
-        .ENABLE_CRC(0)
+        .ENABLE_CRC(1)
     ) dut (
         .clk(clk),
         .rst_n(rst_n),
@@ -125,11 +125,33 @@ module tb_bsr_dma;
     // Send a byte via UART RX simulation
     task uart_send_byte(input [7:0] data);
         @(posedge clk);
+        // Wait until DUT indicates it's ready to accept a byte
+        while (!uart_rx_ready) @(posedge clk);
         uart_rx_data <= data;
         uart_rx_valid <= 1'b1;
         @(posedge clk);
         uart_rx_valid <= 1'b0;
     endtask
+
+    // CRC32 update function (LSB-first, same as RTL)
+    function automatic [31:0] tb_crc32_byte(input [31:0] cur, input [7:0] data);
+        reg [31:0] c;
+        reg [7:0] d;
+        integer i;
+        begin
+            c = cur;
+            d = data;
+            for (i = 0; i < 8; i = i + 1) begin
+                if ((c[31] ^ d[0]) == 1'b1) begin
+                    c = (c << 1) ^ 32'h04C11DB7;
+                end else begin
+                    c = (c << 1);
+                end
+                d = d >> 1;
+            end
+            tb_crc32_byte = c;
+        end
+    endfunction
     
     // Write to CSR
     task csr_write(input [7:0] addr, input [31:0] data);
@@ -153,6 +175,7 @@ module tb_bsr_dma;
     // Test Stimulus
     // ========================================================================
     reg [31:0] read_value;
+    reg [31:0] tb_crc;
     
     initial begin
         uart_rx_valid = 1'b0;
@@ -167,7 +190,7 @@ module tb_bsr_dma;
         // TEST 1: Initial state verification
         // ====================================================================
         $display("\nTEST 1: Initial state");
-        csr_read(8'h23);
+            csr_read(8'h53);
         read_value = csr_rdata;
         if (read_value[0] == 1'b0 && read_value[1] == 1'b0) begin
             $display("  PASS: DMA idle and not done on reset");
@@ -179,7 +202,8 @@ module tb_bsr_dma;
         // TEST 2: DMA start via CSR
         // ====================================================================
         $display("\nTEST 2: DMA start");
-        csr_write(8'h21, 32'h0000_0001);  // Write START bit
+            // Write START bit and enable 32-bit word mode (bit 2)
+            csr_write(8'h51, 32'h0000_0001 | (1 << 2));  // START + WORD_MODE
         #20;
         
         if (dma_busy) begin
@@ -195,7 +219,7 @@ module tb_bsr_dma;
         uart_send_byte(8'h02);  // Select layer 2
         #50;
         
-        csr_read(8'h20);
+            csr_read(8'h50);
         read_value = csr_rdata;
         if (read_value[2:0] == 3'd2) begin
             $display("  PASS: Layer 2 selected");
@@ -208,6 +232,26 @@ module tb_bsr_dma;
         // ====================================================================
         $display("\nTEST 4: row_ptr BRAM writes");
         
+        // Send header first (num_block_rows, num_block_cols, total_blocks)
+        // Use LSB-first ordering for each 32-bit value
+        // Example: num_block_rows = 3, num_block_cols = 1, total_blocks = 1
+        $display("Sending header: rows=3, cols=1, blocks=1");
+        uart_send_byte(8'h03);
+        uart_send_byte(8'h00);
+        uart_send_byte(8'h00);
+        uart_send_byte(8'h00);
+        uart_send_byte(8'h01);
+        uart_send_byte(8'h00);
+        uart_send_byte(8'h00);
+        uart_send_byte(8'h00);
+        uart_send_byte(8'h01);
+        uart_send_byte(8'h00);
+        uart_send_byte(8'h00);
+        uart_send_byte(8'h00);
+
+        // Compute CRC over header+payload as we send
+        tb_crc = 32'hFFFF_FFFF;
+
         // Simulate receiving 4 bytes of row_ptr[0]
         uart_send_byte(8'h00);  // LSB
         uart_send_byte(8'h00);
@@ -247,10 +291,18 @@ module tb_bsr_dma;
         // ====================================================================
         $display("\nTEST 6: Block data streaming (first 8 bytes of 64)");
         
-        // Send first 8 bytes of an 8×8 block (first row)
-        for (int i = 0; i < 8; i++) begin
-            uart_send_byte(8'h10 + i);  // Send pattern 0x10-0x17
+        // Send 64 bytes of an 8×8 block (one full block)
+        for (int i = 0; i < 64; i++) begin
+            uart_send_byte(8'h10 + i);  // Send pattern 0x10-0x4F
+            tb_crc = tb_crc32_byte(tb_crc, 8'h10 + i);
         end
+
+        // Now send CRC (final XOR ~crc)
+        tb_crc = ~tb_crc;
+        uart_send_byte(tb_crc[7:0]);
+        uart_send_byte(tb_crc[15:8]);
+        uart_send_byte(tb_crc[23:16]);
+        uart_send_byte(tb_crc[31:24]);
         
         #200;
         
@@ -265,7 +317,7 @@ module tb_bsr_dma;
         // TEST 7: Block counter
         // ====================================================================
         $display("\nTEST 7: Block counter");
-        csr_read(8'h22);
+            csr_read(8'h52);
         read_value = csr_rdata;
         $display("  Blocks written so far: %d", read_value);
         
@@ -273,7 +325,7 @@ module tb_bsr_dma;
         // TEST 8: Status readback
         // ====================================================================
         $display("\nTEST 8: Status readback");
-        csr_read(8'h23);
+            csr_read(8'h53);
         read_value = csr_rdata;
         $display("  DMA Status: busy=%d, done=%d, error=%d",
                  read_value[0], read_value[1], read_value[2]);
@@ -303,8 +355,8 @@ module tb_bsr_dma;
     end
     
     always @(posedge block_we) begin
-        $display("%0t: block write: addr=0x%07x, data=0x%02x",
-                 $time, block_waddr, block_wdata);
+        $display("%0t: block write: word_addr=0x%06x, byte_addr=0x%07x, data=0x%08x",
+                 $time, block_waddr, (block_waddr << 2), block_wdata);
     end
 
 endmodule

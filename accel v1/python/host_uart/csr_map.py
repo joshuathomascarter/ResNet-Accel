@@ -29,6 +29,11 @@ SCALE_Sw     = 0x30  #: Weight scale (float32)
 UART_len_max = 0x34  #: UART max packet length
 UART_crc_en  = 0x38  #: UART CRC enable
 STATUS       = 0x3C  #: Status register
+# DMA CSR registers (BSR DMA)
+DMA_LAYER    = 0x50  #: DMA: layer selection (0-7)
+DMA_CTRL     = 0x51  #: DMA: control (start/reset)
+DMA_COUNT    = 0x52  #: DMA: blocks written
+DMA_STATUS   = 0x53  #: DMA: status
 
 # Performance monitor registers (Read-Only)
 PERF_TOTAL   = 0x40  #: Total cycles from start to done
@@ -73,6 +78,10 @@ CSR_LAYOUT = [
     (PERF_TOTAL,   "PERF_TOTAL",   "u32", "Total cycles from start to done (RO)"),
     (PERF_ACTIVE,  "PERF_ACTIVE",  "u32", "Cycles where busy was high (RO)"),
     (PERF_IDLE,    "PERF_IDLE",    "u32", "Cycles where busy was low (RO)"),
+    (DMA_LAYER,    "DMA_LAYER",    "u32", "BSR DMA: Active Layer"),
+    (DMA_CTRL,     "DMA_CTRL",     "u32", "BSR DMA: Control (start, reset)"),
+    (DMA_COUNT,    "DMA_COUNT",    "u32", "BSR DMA: Blocks loaded"),
+    (DMA_STATUS,   "DMA_STATUS",   "u32", "BSR DMA status"),
 ]
 
 FIELD_TYPES = {
