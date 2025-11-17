@@ -400,7 +400,7 @@ module bsr_dma #(
                             row_ptr_addr <= row_ptr_addr + 1;
                             rx_byte_count <= 2'd0;
                             rx_word_buf <= 32'd0;
-                            if (row_ptr_remaining > 0) row_ptr_remaining <= row_ptr_remaining - 1;
+                            if (                            black --check --line-length 120 "ACCEL-v1/accel v1/python/" > 0) row_ptr_remaining <= row_ptr_remaining - 1;
                             // move to next stage if done
                             if (row_ptr_remaining == 1) next_state = RX_COL_IDX_INIT;
                         end else begin

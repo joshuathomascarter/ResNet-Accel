@@ -96,6 +96,11 @@ module axi_lite_slave #(
     reg [CSR_ADDR_WIDTH-1:0] read_addr;
     reg read_valid;
     
+    // Read pipeline stage (to ensure data is available when rvalid asserts)
+    reg [CSR_DATA_WIDTH-1:0] read_data_pipe;
+    reg [1:0] read_resp_pipe;
+    reg read_valid_pipe;
+    
     // ========================================================================
     // Write Address Path
     // ========================================================================
@@ -147,7 +152,8 @@ module axi_lite_slave #(
         end else begin
             csr_wen <= 1'b0;  // Pulse
             
-            // When both address and data are available, perform write
+            // Trigger write when BOTH address and data handshakes have occurred
+            // (write_addr and write_data are latched from their handshakes)
             if (write_valid && s_axi_wvalid && !s_axi_bvalid) begin
                 if (is_valid_csr(write_addr)) begin
                     csr_addr <= write_addr;
@@ -155,15 +161,15 @@ module axi_lite_slave #(
                     csr_wen <= 1'b1;
                     s_axi_bresp <= 2'b00;  // OKAY
                 end else begin
-                    s_axi_bresp <= 2'b11;  // SLVERR (Slave Error)
+                    s_axi_bresp <= 2'b10;  // SLVERR (Slave Error)
                     axi_error <= 1'b1;
                 end
                 s_axi_bvalid <= 1'b1;
-                s_axi_wready <= 1'b0;
             end else if (b_handshake) begin
                 // Response accepted by master; clear for next write
                 s_axi_bvalid <= 1'b0;
                 s_axi_wready <= 1'b1;
+                write_valid <= 1'b0;  // Clear write_valid here to allow next write
             end
         end
     end
@@ -189,30 +195,48 @@ module axi_lite_slave #(
     end
     
     // ========================================================================
-    // Read Data Path & CSR Read
+    // Read Data Path & CSR Read (Two-stage pipeline)
     // ========================================================================
+    // Stage 1: Issue read to CSR
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            s_axi_rvalid <= 1'b0;
-            s_axi_rdata <= {CSR_DATA_WIDTH{1'b0}};
-            s_axi_rresp <= 2'b00;
+            read_data_pipe <= {CSR_DATA_WIDTH{1'b0}};
+            read_resp_pipe <= 2'b00;
+            read_valid_pipe <= 1'b0;
             csr_ren <= 1'b0;
         end else begin
             csr_ren <= 1'b0;  // Pulse
             
             // When read address is available, perform read
-            if (read_valid && !s_axi_rvalid) begin
+            if (read_valid && !read_valid_pipe) begin
                 if (is_valid_csr(read_addr)) begin
                     csr_addr <= read_addr;
                     csr_ren <= 1'b1;
-                    s_axi_rresp <= 2'b00;  // OKAY
+                    read_resp_pipe <= 2'b00;  // OKAY
                 end else begin
-                    s_axi_rresp <= 2'b11;  // SLVERR
+                    read_resp_pipe <= 2'b10;  // SLVERR
                     axi_error <= 1'b1;
                 end
-                s_axi_rdata <= csr_rdata;  // Combinational read from CSR
+                read_data_pipe <= csr_rdata;
+                read_valid_pipe <= 1'b1;
+            end else if (s_axi_rvalid && s_axi_rready) begin
+                read_valid_pipe <= 1'b0;
+            end
+        end
+    end
+    
+    // Stage 2: Latch pipeline to output
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            s_axi_rvalid <= 1'b0;
+            s_axi_rdata <= {CSR_DATA_WIDTH{1'b0}};
+            s_axi_rresp <= 2'b00;
+        end else begin
+            if (read_valid_pipe && !s_axi_rvalid) begin
+                s_axi_rdata <= read_data_pipe;
+                s_axi_rresp <= read_resp_pipe;
                 s_axi_rvalid <= 1'b1;
-            end else if (r_handshake) begin
+            end else if (s_axi_rvalid && s_axi_rready) begin
                 s_axi_rvalid <= 1'b0;
             end
         end

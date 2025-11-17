@@ -55,8 +55,8 @@ def gen_vectors(M: int, N: int, K: int, count: int, out_dir: str):
             B = rng.integers(-4, 5, size=(K, N), dtype=np.int32)
         elif t == 1:
             # corner: large values to test wrap
-            A = rng.integers(-2**15, 2**15 - 1, size=(M, K), dtype=np.int32)
-            B = rng.integers(-2**15, 2**15 - 1, size=(K, N), dtype=np.int32)
+            A = rng.integers(-(2**15), 2**15 - 1, size=(M, K), dtype=np.int32)
+            B = rng.integers(-(2**15), 2**15 - 1, size=(K, N), dtype=np.int32)
         else:
             A = rng.integers(-128, 127, size=(M, K), dtype=np.int32)
             B = rng.integers(-128, 127, size=(K, N), dtype=np.int32)

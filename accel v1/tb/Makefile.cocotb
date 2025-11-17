@@ -1,0 +1,148 @@
+# ============================================================================
+# Makefile.cocotb — Cocotb Configuration for AXI Testbench
+# ============================================================================
+# Usage:
+#   make -f tb/Makefile.cocotb SIM=iverilog
+#   make -f tb/Makefile.cocotb SIM=verilator
+#   make -f tb/Makefile.cocotb clean
+# ============================================================================
+
+# Directories
+VERILOG_SRC_DIR = verilog
+VERILOG_TB_DIR = verilog/host_iface
+PYTHON_TB_DIR = tb
+PYTHON_HOST_DIR = python/host
+
+# Top module
+TOPLEVEL = tb_axi_lite_slave
+
+# Testbench module
+TOPLEVEL_LANG = verilog
+
+# Cocotb test file
+MODULE = cocotb_axi_master_test
+
+# Verilog sources
+VERILOG_SOURCES = $(VERILOG_TB_DIR)/axi_lite_slave.sv \
+                  $(VERILOG_TB_DIR)/tb_axi_lite_slave.sv
+
+# Python path for cocotb
+export PYTHONPATH:=$(PWD)/$(PYTHON_HOST_DIR):$(PYTHONPATH)
+
+# Simulator selection (default: iverilog)
+SIM ?= iverilog
+
+# Simulation parameters
+SIM_TIME = 100us
+SIM_CLOCK = 10ns
+
+# iverilog options
+IVERILOG_OPTS = -g2009 -Wall -Winfclip
+VVPSIM_OPTS = -v
+
+# Verilator options (if used)
+VERILATOR_OPTS = --trace
+
+# Common options
+COMPILE_ARGS = -v
+RUN_ARGS = -v
+
+# Trace options
+# TRACE = 1  # Uncomment to enable VCD waveform generation
+TRACE_OPTS = --dump-file=sim.vcd
+
+# ============================================================================
+# Cocotb Configuration
+# ============================================================================
+COCOTB_HDL_TIMEUNIT = 1ns
+COCOTB_HDL_TIMEPRECISION = 1ps
+
+# Randomization
+RANDOM_SEED ?= 0
+
+# ============================================================================
+# Targets
+# ============================================================================
+
+# Default target
+all: sim
+
+# Run simulation
+sim: | check_cocotb check_verilog
+	@echo "=========================================="
+	@echo "Running Cocotb AXI Master Tests"
+	@echo "Simulator: $(SIM)"
+	@echo "Test module: $(MODULE)"
+	@echo "=========================================="
+	cd $(PYTHON_TB_DIR) && \
+	make -B TOPLEVEL=$(TOPLEVEL) \
+	        MODULE=$(MODULE) \
+	        VERILOG_SOURCES="../../$(VERILOG_SOURCES)" \
+	        SIM=$(SIM) \
+	        $(EXTRA_MAKE_OPTS)
+
+# Clean up
+clean:
+	@echo "Cleaning simulation artifacts..."
+	cd $(PYTHON_TB_DIR) && make -B TOPLEVEL=$(TOPLEVEL) MODULE=$(MODULE) SIM=$(SIM) clean
+	rm -rf $(PYTHON_TB_DIR)/work
+	rm -rf $(PYTHON_TB_DIR)/*.vcd
+	rm -rf $(PYTHON_TB_DIR)/*.vvp
+	rm -rf $(PYTHON_TB_DIR)/results.xml
+	rm -rf $(PYTHON_TB_DIR)/__pycache__
+
+# Check Cocotb installation
+check_cocotb:
+	@command -v cocotb-config >/dev/null 2>&1 || \
+	(echo "ERROR: Cocotb not found. Install with: pip install cocotb"; exit 1)
+
+# Check Verilog files exist
+check_verilog:
+	@for file in $(VERILOG_SOURCES); do \
+	  [ -f "$$file" ] || (echo "ERROR: $$file not found"; exit 1); \
+	done
+	@echo "✓ Verilog source files found"
+
+# List tests in cocotb module
+list_tests:
+	@echo "Available tests in $(MODULE):"
+	@grep -n "^async def test_\|^def test_" $(PYTHON_TB_DIR)/$(MODULE).py | \
+	  sed 's/:/@cocotb.test()/' | \
+	  sed 's/^/@  /'
+
+# View waveform (if trace was generated)
+wave:
+	@if [ -f "$(PYTHON_TB_DIR)/sim.vcd" ]; then \
+	  echo "Opening waveform..."; \
+	  gtkwave $(PYTHON_TB_DIR)/sim.vcd & \
+	else \
+	  echo "ERROR: sim.vcd not found. Run with TRACE=1"; \
+	fi
+
+# Generate VCD waveform
+trace: EXTRA_MAKE_OPTS = TRACE=1
+trace: sim
+
+# Help
+help:
+	@echo "Cocotb AXI Testbench Makefile"
+	@echo ""
+	@echo "Targets:"
+	@echo "  make -f tb/Makefile.cocotb sim          Run simulation (default)"
+	@echo "  make -f tb/Makefile.cocotb clean        Clean simulation artifacts"
+	@echo "  make -f tb/Makefile.cocotb trace        Run with waveform trace"
+	@echo "  make -f tb/Makefile.cocotb wave         Open waveform viewer"
+	@echo "  make -f tb/Makefile.cocotb list_tests   List available tests"
+	@echo "  make -f tb/Makefile.cocotb help         Show this help"
+	@echo ""
+	@echo "Examples:"
+	@echo "  # Run with iverilog (default)"
+	@echo "  make -f tb/Makefile.cocotb SIM=iverilog"
+	@echo ""
+	@echo "  # Run with verilator and trace"
+	@echo "  make -f tb/Makefile.cocotb SIM=verilator TRACE=1"
+	@echo ""
+	@echo "  # Clean and re-run"
+	@echo "  make -f tb/Makefile.cocotb clean && make -f tb/Makefile.cocotb"
+
+.PHONY: all sim clean check_cocotb check_verilog list_tests wave trace help

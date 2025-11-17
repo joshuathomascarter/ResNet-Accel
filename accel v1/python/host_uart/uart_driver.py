@@ -20,8 +20,9 @@ SYNC1 = 0x5A
 # Commands (Accel v1)
 LOAD_A_TILE = 0x01
 LOAD_B_TILE = 0x02
-START_TILE  = 0x03
+START_TILE = 0x03
 READ_C_TILE = 0x04
+
 
 def crc8(data: bytes, poly: int = 0x07, init: int = 0x00) -> int:
     crc = init
@@ -34,22 +35,26 @@ def crc8(data: bytes, poly: int = 0x07, init: int = 0x00) -> int:
                 crc = (crc << 1) & 0xFF
     return crc & 0xFF
 
+
 def make_packet(cmd: int, payload: bytes) -> bytes:
     if not (0 <= cmd <= 255):
         raise ValueError("cmd must be 0..255")
     if len(payload) > 255:
         raise ValueError("payload too long (max 255)")
     hdr = bytes([SYNC0, SYNC1, len(payload) & 0xFF, cmd & 0xFF])
-    c   = crc8(hdr[2:] + payload)  # CRC over LEN|CMD|PAYLOAD
+    c = crc8(hdr[2:] + payload)  # CRC over LEN|CMD|PAYLOAD
     return hdr + payload + bytes([c])
+
 
 @dataclass
 class Packet:
     cmd: int
     payload: bytes
 
+
 class StreamParser:
     """Incremental parser for framed packets."""
+
     def __init__(self):
         self.buf = bytearray()
 
@@ -65,14 +70,14 @@ class StreamParser:
         i = 0
         b = self.buf
         while i + 4 <= len(b):
-            if b[i] != SYNC0 or b[i+1] != SYNC1:
+            if b[i] != SYNC0 or b[i + 1] != SYNC1:
                 i += 1
                 continue
-            ln = b[i+2]
+            ln = b[i + 2]
             total = 4 + ln + 1
             if i + total > len(b):
                 break  # incomplete
-            chunk = b[i:i+total]
+            chunk = b[i : i + total]
             crc_calc = crc8(chunk[2:-1])
             if crc_calc != chunk[-1]:
                 # CRC fail: drop the leading SYNC0 and rescan from next byte
@@ -81,25 +86,32 @@ class StreamParser:
             return (pkt, i + total)
         return (None, i)
 
+
 class LoopbackSerial:
     """Minimal in-process serial-like transport for tests."""
+
     def __init__(self):
         self.rx = bytearray()
+
     def write(self, data: bytes) -> int:
-        self.rx += data    # loopback
+        self.rx += data  # loopback
         return len(data)
+
     def read(self, n: int) -> bytes:
         out = bytes(self.rx[:n])
         self.rx = self.rx[n:]
         return out
+
     @property
     def in_waiting(self) -> int:
         return len(self.rx)
 
+
 class UARTDriver:
     """Convenience wrapper to send/receive framed packets over a serial-like stream."""
+
     def __init__(self, ser_like):
-        self.ser = ser_like       # must have write(), read(n), in_waiting
+        self.ser = ser_like  # must have write(), read(n), in_waiting
         self.parser = StreamParser()
 
     def send_packet(self, cmd: int, payload: bytes) -> None:
@@ -120,6 +132,7 @@ class UARTDriver:
     def recv_packet(self, timeout_s: float = 0.5) -> Optional[Packet]:
         """Poll until a packet arrives or timeout (busy-wait; adapt for your runtime)."""
         import time
+
         t0 = time.time()
         while (time.time() - t0) < timeout_s:
             pkt = self.poll()
@@ -127,6 +140,7 @@ class UARTDriver:
                 return pkt
             time.sleep(0.001)
         return None
+
 
 # --- Self-test
 def self_test_loopback():
@@ -138,6 +152,7 @@ def self_test_loopback():
     assert got is not None, "no packet received"
     assert got.cmd == LOAD_A_TILE and got.payload == payload
     print("Loopback self-test PASS")
+
 
 if __name__ == "__main__":
     self_test_loopback()

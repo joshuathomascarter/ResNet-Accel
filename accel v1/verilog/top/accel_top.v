@@ -662,32 +662,36 @@ module accel_top #(
         .csr_rdata(axi_csr_rdata)
     );
     
-    // AXI DMA Bridge (optional - for future AXI-Full burst writes)
-    // For now, kept disabled; can be enabled in Phase 4b
-    // axi_dma_bridge axi_dma_bridge_inst (
-    //     .clk(clk),
-    //     .rst_n(rst_n),
-    //     .s_axi_awaddr(s_axi_awaddr),
-    //     .s_axi_awburst(s_axi_awburst),
-    //     .s_axi_awlen(s_axi_awlen),
-    //     .s_axi_awsize(s_axi_awsize),
-    //     .s_axi_awvalid(s_axi_awvalid),
-    //     .s_axi_awready(s_axi_awready),
-    //     .s_axi_wdata(s_axi_wdata),
-    //     .s_axi_wstrb(s_axi_wstrb),
-    //     .s_axi_wlast(s_axi_wlast),
-    //     .s_axi_wvalid(s_axi_wvalid),
-    //     .s_axi_wready(s_axi_wready),
-    //     .s_axi_bresp(s_axi_bresp),
-    //     .s_axi_bvalid(s_axi_bvalid),
-    //     .s_axi_bready(s_axi_bready),
-    //     .dma_fifo_wdata(axi_dma_fifo_wdata),
-    //     .dma_fifo_wen(axi_dma_fifo_wen),
-    //     .dma_fifo_full(axi_dma_fifo_full),
-    //     .dma_fifo_count(axi_dma_fifo_count),
-    //     .axi_error(axi_error),
-    //     .words_written()
-    // );
+    // AXI DMA Bridge - for AXI-Full burst writes to DMA FIFO
+    axi_dma_bridge axi_dma_bridge_inst (
+        .clk(clk),
+        .rst_n(rst_n),
+        .s_axi_awaddr(s_axi_awaddr),
+        .s_axi_awburst(s_axi_awburst),
+        .s_axi_awlen(s_axi_awlen),
+        .s_axi_awsize(s_axi_awsize),
+        .s_axi_awvalid(s_axi_awvalid),
+        .s_axi_awready(s_axi_awready),
+        .s_axi_wdata(s_axi_wdata),
+        .s_axi_wstrb(s_axi_wstrb),
+        .s_axi_wlast(s_axi_wlast),
+        .s_axi_wvalid(s_axi_wvalid),
+        .s_axi_wready(s_axi_wready),
+        .s_axi_bresp(s_axi_bresp),
+        .s_axi_bvalid(s_axi_bvalid),
+        .s_axi_bready(s_axi_bready),
+        .dma_fifo_wdata(axi_dma_fifo_wdata),
+        .dma_fifo_wen(axi_dma_fifo_wen),
+        .dma_fifo_full(axi_dma_fifo_full),
+        .dma_fifo_count(axi_dma_fifo_count),
+        .axi_error(axi_error),
+        .words_written()
+    );
+    
+    // DMA FIFO feedback (TODO: connect to actual FIFO consumer in future)
+    // For now, provide safe placeholder values
+    assign axi_dma_fifo_full = 1'b0;   // Never full (data accepted but dropped)
+    assign axi_dma_fifo_count = 7'd0;  // Always empty
     
     // ========================================================================
     // CSR Mux: UART vs AXI Sources
