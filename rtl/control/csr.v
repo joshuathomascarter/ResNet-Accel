@@ -30,6 +30,8 @@ module csr #(
   input  wire [31:0]       perf_total_cycles,
   input  wire [31:0]       perf_active_cycles,
   input  wire [31:0]       perf_idle_cycles,
+  // Systolic array results (captured when done)
+  input  wire [127:0]      result_data,  // 4×32-bit results from 2×2 array
   // Pulses / config to core (snapshots consumed by core FSM)
   output wire              start_pulse,
   output wire              abort_pulse,
@@ -66,6 +68,11 @@ module csr #(
   localparam PERF_TOTAL   = 8'h40; // Total cycles from start to done
   localparam PERF_ACTIVE  = 8'h44; // Cycles where busy was high  
   localparam PERF_IDLE    = 8'h48; // Cycles where busy was low
+  // Result registers (Read-Only, captured on done)
+  localparam RESULT_0     = 8'h80; // c_out[0]
+  localparam RESULT_1     = 8'h84; // c_out[1]
+  localparam RESULT_2     = 8'h88; // c_out[2]
+  localparam RESULT_3     = 8'h8C; // c_out[3]
 
   // Backing regs
   reg        r_irq_en;
@@ -81,6 +88,9 @@ module csr #(
   reg        st_done_tile;
   reg        st_err_crc;
   reg        st_err_illegal;
+  
+  // Result capture registers
+  reg [31:0] r_result_0, r_result_1, r_result_2, r_result_3;
 
   // Coverage hooks (for UVM or functional coverage)
   // covergroup cg_csr_write @(posedge clk);
@@ -105,11 +115,23 @@ module csr #(
       st_done_tile     <= 1'b0;
       st_err_crc       <= 1'b0;
       st_err_illegal   <= 1'b0;
+      r_result_0       <= 32'd0;
+      r_result_1       <= 32'd0;
+      r_result_2       <= 32'd0;
+      r_result_3       <= 32'd0;
     end else begin
       // Sticky setters
       if (core_done_tile_pulse) st_done_tile <= 1'b1;
       if (rx_crc_error)         st_err_crc   <= 1'b1;
       if (rx_illegal_cmd)       st_err_illegal <= 1'b1;
+      
+      // Capture results when computation completes
+      if (core_done_tile_pulse) begin
+        r_result_0 <= result_data[31:0];
+        r_result_1 <= result_data[63:32];
+        r_result_2 <= result_data[95:64];
+        r_result_3 <= result_data[127:96];
+      end
 
       // CSR writes
       if (csr_wen) begin
@@ -204,6 +226,11 @@ module csr #(
       PERF_TOTAL:   csr_rdata = perf_total_cycles;
       PERF_ACTIVE:  csr_rdata = perf_active_cycles;
       PERF_IDLE:    csr_rdata = perf_idle_cycles;
+      // Result registers (Read-Only)
+      RESULT_0:     csr_rdata = r_result_0;
+      RESULT_1:     csr_rdata = r_result_1;
+      RESULT_2:     csr_rdata = r_result_2;
+      RESULT_3:     csr_rdata = r_result_3;
       default:      csr_rdata = 32'hDEAD_BEEF;
     endcase
   end

@@ -364,7 +364,8 @@ module accel_top #(
         .uart_crc_en(uart_crc_en),
         .perf_total_cycles(perf_total_cycles),
         .perf_active_cycles(perf_active_cycles),
-        .perf_idle_cycles(perf_idle_cycles)
+        .perf_idle_cycles(perf_idle_cycles),
+        .result_data(c_out_flat[127:0])  // Connect systolic array output
     );
 
     // ========================================================================
