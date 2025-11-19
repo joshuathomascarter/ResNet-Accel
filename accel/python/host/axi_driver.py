@@ -11,7 +11,7 @@ Features:
   - CSR read/write via actual AXI4-Lite transactions
   - AXI burst write with latency measurement
   - DMA status polling with timeout
-  - Complete end-to-end example (no placeholders)
+  - Full end-to-end example with complete data flow
 
 Author: ACCEL-v1 Team
 """
@@ -396,7 +396,7 @@ def example_usage():
     driver.print_metrics()
 
     print("\n" + "=" * 70)
-    print("✅ Example complete - ZERO PLACEHOLDERS, full AXI4-Lite simulation")
+    print("✅ Example complete - Full AXI4-Lite simulation with real data transfer")
     print("=" * 70 + "\n")
 
 

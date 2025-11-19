@@ -4,7 +4,7 @@
 # =============================================================================
 # Purpose:
 #   Automated regression testing for ACCEL-v1 RTL modules.
-#   Compiles and runs testbenches for DMA, metadata, and integration paths.
+#   Uses Makefile.verilator to build and run tests.
 #
 # Usage:
 #   ./ci_verilator.sh [test_name]
@@ -14,9 +14,9 @@
 
 set -e
 
-WORKSPACE="/workspaces/ACCEL-v1/accel v1"
-BUILD_DIR="${WORKSPACE}/../build"
-LOG_DIR="${WORKSPACE}/../logs"
+WORKSPACE="/workspaces/ACCEL-v1"
+BUILD_DIR="${WORKSPACE}/build/verilator"
+LOG_DIR="${WORKSPACE}/accel/logs"
 
 # Colors for output
 RED='\033[0;31m'
@@ -37,46 +37,38 @@ echo -e "${YELLOW}========================================${NC}\n"
 # Helper Functions
 # ============================================================================
 
-run_test() {
-    local test_name=$1
-    local test_dir=$2
-    local rtl_files=$3
+run_make_target() {
+    local target=$1
+    local description=$2
     
-    echo -ne "${YELLOW}[TEST]${NC} $test_name ... "
+    echo -ne "${YELLOW}[TEST]${NC} $description ... "
     
-    mkdir -p "$BUILD_DIR/$test_name"
-    cd "$BUILD_DIR/$test_name"
-    
-    # Compile with Verilator
-    if verilator -Wall -Wno-MODDUP -Wno-WIDTHEXPAND \
-        -I"${WORKSPACE}/verilog" \
-        -I"${WORKSPACE}/verilog/dma" \
-        -I"${WORKSPACE}/verilog/meta" \
-        -I"${WORKSPACE}/verilog/top" \
-        --trace \
-        --cc \
-        $rtl_files \
-        2>&1 | tee "$LOG_DIR/$test_name.compile.log"; then
-        
-        # Make C++ testbench
-        cd obj_dir
-        make -f Vtest.mk 2>&1 | tee "$LOG_DIR/$test_name.build.log"
-        
-        # Run simulation
-        if ./Vtest 2>&1 | tee "$LOG_DIR/$test_name.sim.log"; then
-            echo -e "${GREEN}PASS${NC}"
-            ((TESTS_PASSED++))
-            return 0
-        else
-            echo -e "${RED}FAIL${NC} (simulation error)"
-            ((TESTS_FAILED++))
-            FAILED_TESTS+=("$test_name")
-            return 1
-        fi
+    if make -f Makefile.verilator $target > "$LOG_DIR/$target.log" 2>&1; then
+        echo -e "${GREEN}PASS${NC}"
+        ((TESTS_PASSED++))
+        return 0
     else
-        echo -e "${RED}FAIL${NC} (compile error)"
+        echo -e "${RED}FAIL${NC}"
         ((TESTS_FAILED++))
-        FAILED_TESTS+=("$test_name")
+        FAILED_TESTS+=("$target")
+        return 1
+    fi
+}
+
+run_executable() {
+    local exe=$1
+    local description=$2
+    
+    echo -ne "${YELLOW}[RUN]${NC} $description ... "
+    
+    if $exe > "$LOG_DIR/run_$description.log" 2>&1; then
+        echo -e "${GREEN}PASS${NC}"
+        ((TESTS_PASSED++))
+        return 0
+    else
+        echo -e "${RED}FAIL${NC}"
+        ((TESTS_FAILED++))
+        FAILED_TESTS+=("$description")
         return 1
     fi
 }
@@ -85,7 +77,7 @@ run_test() {
 # Setup
 # ============================================================================
 
-mkdir -p "$BUILD_DIR" "$LOG_DIR"
+mkdir -p "$LOG_DIR"
 
 # Check for Verilator
 if ! command -v verilator &> /dev/null; then
@@ -96,46 +88,28 @@ fi
 VERILATOR_VERSION=$(verilator --version 2>&1 | head -1)
 echo -e "Verilator: ${GREEN}${VERILATOR_VERSION}${NC}\n"
 
+cd "$WORKSPACE"
+
 # ============================================================================
 # Test Suite
 # ============================================================================
 
 TEST_SUITE=$1
-
-# Test 1: DMA Lite Module
-if [[ "$TEST_SUITE" == "all" || "$TEST_SUITE" == "dma_lite" ]]; then
-    run_test "test_dma_lite" \
-        "${WORKSPACE}/tb/unit" \
-        "${WORKSPACE}/verilog/dma/dma_lite.v ${WORKSPACE}/tb/unit/tb_dma_lite.sv" \
-        || true
+if [ -z "$TEST_SUITE" ]; then
+    TEST_SUITE="all"
 fi
 
-# Test 2: Metadata Decoder
-if [[ "$TEST_SUITE" == "all" || "$TEST_SUITE" == "meta_decode" ]]; then
-    run_test "test_meta_decode" \
-        "${WORKSPACE}/tb/unit" \
-        "${WORKSPACE}/verilog/meta/meta_decode.sv ${WORKSPACE}/tb/unit/tb_meta_decode.sv" \
-        || true
+# Test 1: Linting
+if [[ "$TEST_SUITE" == "all" || "$TEST_SUITE" == "lint" ]]; then
+    run_make_target "lint" "RTL Linting" || true
 fi
 
-# Test 3: BSR DMA (existing)
-if [[ "$TEST_SUITE" == "all" || "$TEST_SUITE" == "bsr_dma" ]]; then
-    run_test "test_bsr_dma" \
-        "${WORKSPACE}/tb/unit" \
-        "${WORKSPACE}/verilog/dma/bsr_dma.v ${WORKSPACE}/tb/unit/tb_bsr_dma.sv" \
-        || true
-fi
-
-# Test 4: AXI Host Interface
-if [[ "$TEST_SUITE" == "all" || "$TEST_SUITE" == "axi_host" ]]; then
-    # Note: Requires full accel_top dependencies; skip in basic CI
-    echo -e "${YELLOW}[SKIP]${NC} test_axi_host (requires full module stack)"
-fi
-
-# Test 5: Integration (DMA → Metadata → Scheduler skeleton)
-if [[ "$TEST_SUITE" == "all" || "$TEST_SUITE" == "integration" ]]; then
-    # TODO: Build integration testbench when scheduler available
-    echo -e "${YELLOW}[SKIP]${NC} test_integration (scheduler not finalized)"
+# Test 2: Stress Test Build & Run
+if [[ "$TEST_SUITE" == "all" || "$TEST_SUITE" == "stress" ]]; then
+    run_make_target "stress" "Build Stress Test"
+    if [ $? -eq 0 ]; then
+        run_executable "./build/verilator/Vaccel_top_stress" "Run Stress Test" || true
+    fi
 fi
 
 # ============================================================================
@@ -155,7 +129,7 @@ if [[ ${#FAILED_TESTS[@]} -gt 0 ]]; then
     echo -e "\n${RED}Failed tests:${NC}"
     for test in "${FAILED_TESTS[@]}"; do
         echo -e "  • $test"
-        echo -e "    Logs: $LOG_DIR/$test.*.log"
+        echo -e "    Logs: $LOG_DIR/$test.log"
     done
     exit 1
 else

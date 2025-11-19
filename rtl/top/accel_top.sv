@@ -883,9 +883,16 @@ module accel_top #(
         .words_written()
     );
     
-    // DMA FIFO feedback - connected to weight/activation buffer consumers
-    // For now, provide safe placeholder values
-    assign axi_dma_fifo_full = 1'b0;   // Never full (data accepted but dropped)
+    // DMA FIFO feedback - connected to weight/activation buffer reads
+    reg [6:0] dma_pending_count;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            dma_pending_count <= 7'd0;
+        else
+            dma_pending_count <= dma_pending_count + (axi_dma_fifo_wen ? 1 : 0) - ((wgt_rd_en | act_rd_en) ? 1 : 0);
+    end
+    assign axi_dma_fifo_full = (dma_pending_count >= 7'd120);
+    assign axi_dma_fifo_count = dma_pending_count;
     assign axi_dma_fifo_count = 7'd0;  // Always empty
     
     // ========================================================================

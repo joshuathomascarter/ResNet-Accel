@@ -129,10 +129,43 @@ module top_sparse #(
     wire systolic_result_ready;
     
     // ========================================================================
-    // UART RX (8-bit input stream)
+    // UART RX (8-bit input stream) - Full Implementation
     // ========================================================================
-    // NOTE: Placeholder for external UART receiver
-    // In production, instantiate uart_rx module from verilog/uart/uart_rx.v
+    // UART receiver with configurable baud rate and 8-bit data
+    // Converts serial UART RX to parallel 8-bit words with valid/ready handshake
+    
+    uart_rx #(
+        .CLK_HZ(CLK_HZ),
+        .BAUD(BAUD),
+        .DATA_BITS(8),
+        .STOP_BITS(1),
+        .PARITY("NONE")
+    ) uart_rx_inst (
+        .clk(clk),
+        .rst_n(rst_n),
+        .uart_rx(uart_rx),
+        .data_out(uart_rx_data),
+        .data_valid(uart_rx_valid),
+        .data_ready(uart_rx_ready)
+    );
+    
+    // ========================================================================
+    // UART TX (Echo for debug - loops RX back to TX)
+    // ========================================================================
+    uart_tx #(
+        .CLK_HZ(CLK_HZ),
+        .BAUD(BAUD),
+        .DATA_BITS(8),
+        .STOP_BITS(1),
+        .PARITY("NONE")
+    ) uart_tx_inst (
+        .clk(clk),
+        .rst_n(rst_n),
+        .uart_tx(uart_tx),
+        .data_in(uart_rx_data),
+        .data_valid(uart_rx_valid),
+        .data_ready()
+    );
     
     // ========================================================================
     // DMA Lite (Metadata Assembly: 8→32 bit)
