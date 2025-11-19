@@ -552,7 +552,7 @@ module bsr_dma #(
                             rx_byte_count <= 2'd0;
                             host_crc <= 32'd0;
                             rx_word_buf <= 32'd0;
-                            next_state <= TX_STATUS;
+                            next_state = TX_STATUS;
                         end else begin
                             rx_byte_count <= rx_byte_count + 1;
                         end
@@ -672,7 +672,7 @@ module bsr_dma #(
             RX_BLOCK_INIT: begin
                 // Compute word-based start address for block data
                 // Each block is BLOCK_SIZE bytes; in word address there are BLOCK_SIZE/WORD_BYTES words per block
-                block_addr_word <= current_block_idx * (BLOCK_SIZE / WORD_BYTES);
+                block_addr_word = current_block_idx * (BLOCK_SIZE / WORD_BYTES);
                 next_state = RX_BLOCK_DATA;
             end
             

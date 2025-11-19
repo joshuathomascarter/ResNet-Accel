@@ -39,6 +39,7 @@ module accel_top #(
     
     // AXI4-Lite Host Interface (Phase 4)
     input  wire [31:0] s_axi_awaddr,
+    input  wire [2:0]  s_axi_awprot,
     input  wire [1:0]  s_axi_awburst,
     input  wire [7:0]  s_axi_awlen,
     input  wire [2:0]  s_axi_awsize,
@@ -53,6 +54,7 @@ module accel_top #(
     output wire        s_axi_bvalid,
     input  wire        s_axi_bready,
     input  wire [31:0] s_axi_araddr,
+    input  wire [2:0]  s_axi_arprot,
     input  wire [1:0]  s_axi_arburst,
     input  wire [7:0]  s_axi_arlen,
     input  wire [2:0]  s_axi_arsize,
@@ -86,6 +88,7 @@ module accel_top #(
     wire [31:0] m_idx, n_idx, k_idx;
     wire bank_sel_wr_A, bank_sel_wr_B;
     wire bank_sel_rd_A, bank_sel_rd_B;
+    wire bank_sel_rd_A_csr, bank_sel_rd_B_csr;  // CSR read-only mirror outputs
     wire [31:0] Sa_bits, Sw_bits;
     wire [31:0] uart_len_max;
     wire uart_crc_en;
@@ -128,6 +131,9 @@ module accel_top #(
     wire [31:0] dma_buf_wdata;
     wire [31:0] dma_buf_waddr;
     wire dma_buf_wen, dma_buf_wready;
+    
+    // BSR DMA signals (separate from AXI DMA)
+    wire bsr_dma_busy, bsr_dma_done, bsr_dma_error;
     
     // UART physical layer
     wire [7:0] uart_rx_data, uart_tx_data;
@@ -469,8 +475,8 @@ module accel_top #(
         .csr_rdata(csr_rdata),
         .core_busy(sched_busy),
         .core_done_tile_pulse(sched_done_tile),
-        .core_bank_sel_rd_A(bank_sel_rd_A),
-        .core_bank_sel_rd_B(bank_sel_rd_B),
+        .core_bank_sel_rd_A(bank_sel_rd_A),  // Input: actual bank being read
+        .core_bank_sel_rd_B(bank_sel_rd_B),  // Input: actual bank being read
         .rx_crc_error(uart_rx_par_err),
         .rx_illegal_cmd(uart_rx_frm_err),
         .start_pulse(start_pulse),
@@ -481,8 +487,8 @@ module accel_top #(
         .m_idx(m_idx), .n_idx(n_idx), .k_idx(k_idx),
         .bank_sel_wr_A(bank_sel_wr_A), 
         .bank_sel_wr_B(bank_sel_wr_B),
-        .bank_sel_rd_A(bank_sel_rd_A), 
-        .bank_sel_rd_B(bank_sel_rd_B),
+        .bank_sel_rd_A(bank_sel_rd_A_csr),  // Output: CSR readback mirror
+        .bank_sel_rd_B(bank_sel_rd_B_csr),  // Output: CSR readback mirror
         .Sa_bits(Sa_bits), 
         .Sw_bits(Sw_bits),
         .uart_len_max(uart_len_max),
@@ -538,9 +544,9 @@ module accel_top #(
         .block_we(dma_block_we),
         .block_waddr(dma_block_waddr),
         .block_wdata(dma_block_wdata),
-        .dma_busy(dma_busy),
-        .dma_done(dma_done),
-        .dma_error(dma_error),
+        .dma_busy(bsr_dma_busy),
+        .dma_done(bsr_dma_done),
+        .dma_error(bsr_dma_error),
         .blocks_written(dma_blocks_written),
         // Metadata decoder interface
         .dma_meta_data(dma_meta_data),
@@ -555,7 +561,6 @@ module accel_top #(
     // ========================================================================
     
     // DMA interface signals for BSR metadata loading
-    wire dma_busy, dma_done, dma_error;
     wire [31:0] dma_blocks_written;
     
     // BSR Scheduler signals
@@ -595,8 +600,6 @@ module accel_top #(
     wire        meta_rd_valid;
     wire        meta_rd_hit;
     
-    // BSR Metadata BRAMs (kept for DMA direct write - legacy compatibility)
-    wire row_ptr_rd_en;
     // BSR Metadata BRAMs (kept for DMA direct write - legacy compatibility)
     wire row_ptr_rd_en;
     wire [15:0] row_ptr_rd_addr;
@@ -673,23 +676,29 @@ module accel_top #(
     meta_decode meta_decode_inst (
         .clk(clk),
         .rst_n(rst_n),
-        // Write interface from DMA
-        .wr_data(dma_meta_data),
-        .wr_addr(dma_meta_waddr),
-        .wr_type(dma_meta_type),
-        .wr_en(dma_meta_wen),
-        .wr_ready(dma_meta_ready),
-        // Read interface to scheduler
-        .rd_en(meta_rd_en),
-        .rd_addr(meta_rd_addr),
-        .rd_type(meta_rd_type),
-        .rd_data(meta_rd_data),
-        .rd_valid(meta_rd_valid),
-        .rd_hit(meta_rd_hit),
-        // Performance monitoring
-        .cache_hits(meta_cache_hits),
-        .cache_misses(meta_cache_misses),
-        .total_reads(meta_decode_cycles)
+        // DMA Input Interface
+        .dma_meta_data(dma_meta_data),
+        .dma_meta_valid(4'hF),  // All bytes valid
+        .dma_meta_type(dma_meta_type),
+        .dma_meta_wen(dma_meta_wen),
+        .dma_meta_ready(dma_meta_ready),
+        // Scheduler Output Interface
+        .sched_meta_raddr(meta_rd_addr),
+        .sched_meta_ren(meta_rd_en),
+        .sched_meta_rdata(meta_rd_data),
+        .sched_meta_rvalid(meta_rd_valid),
+        // Configuration
+        .cfg_num_rows(16'd256),
+        .cfg_num_cols(16'd256),
+        .cfg_total_blocks(32'd1024),
+        .cfg_block_size(3'd1),  // 8x8 blocks
+        // Performance Counters
+        .perf_cache_hits(meta_cache_hits),
+        .perf_cache_misses(meta_cache_misses),
+        .perf_decode_cycles(meta_decode_cycles),
+        // Status & Error
+        .meta_error(),
+        .meta_error_flags()
     );
     
     // BSR Scheduler (traverses sparse blocks)
@@ -821,21 +830,23 @@ module accel_top #(
     axi_lite_slave axi_slave_inst (
         .clk(clk),
         .rst_n(rst_n),
-        .s_axi_awaddr(s_axi_awaddr),
-        .s_axi_awburst(s_axi_awburst),
-        .s_axi_awlen(s_axi_awlen),
-        .s_axi_awsize(s_axi_awsize),
+        // AXI4-Lite Write Address Channel (no burst support)
+        .s_axi_awaddr(s_axi_awaddr[7:0]),  // Only 8-bit CSR address
+        .s_axi_awprot(s_axi_awprot),
         .s_axi_awvalid(s_axi_awvalid),
         .s_axi_awready(s_axi_awready),
+        // AXI4-Lite Write Data Channel
         .s_axi_wdata(s_axi_wdata),
         .s_axi_wstrb(s_axi_wstrb),
-        .s_axi_wlast(s_axi_wlast),
         .s_axi_wvalid(s_axi_wvalid),
         .s_axi_wready(s_axi_wready),
+        // AXI4-Lite Write Response Channel
         .s_axi_bresp(s_axi_bresp),
         .s_axi_bvalid(s_axi_bvalid),
         .s_axi_bready(s_axi_bready),
-        .s_axi_araddr(s_axi_araddr),
+        // AXI4-Lite Read Address Channel
+        .s_axi_araddr(s_axi_araddr[7:0]),
+        .s_axi_arprot(s_axi_arprot),
         .s_axi_arvalid(s_axi_arvalid),
         .s_axi_arready(s_axi_arready),
         .s_axi_rdata(s_axi_rdata),

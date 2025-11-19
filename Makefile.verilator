@@ -18,6 +18,8 @@ VERILATOR_FLAGS = \
     --sv \
     --Wall \
     --Wno-fatal \
+    --Wno-MULTIDRIVEN \
+    --Wno-BLKANDNBLK \
     --trace \
     -I$(RTL_DIR) \
     -I$(RTL_DIR)/systolic \
