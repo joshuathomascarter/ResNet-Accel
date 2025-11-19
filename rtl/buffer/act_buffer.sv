@@ -112,7 +112,7 @@ module act_buffer #(
     // cg_act_write cg = new();
 
     // Write logic (host)
-    always @(posedge clk) begin
+    always @(posedge buf_gated_clk) begin
         if (we) begin
             if (bank_sel_wr == 1'b0)
                 mem0[waddr] <= wdata;
@@ -123,7 +123,7 @@ module act_buffer #(
 
     // 1-cycle read latency (array)
     reg [TM*8-1:0] read_data;
-    always @(posedge clk) begin
+    always @(posedge buf_gated_clk) begin
         if (rd_en) begin
             if (bank_sel_rd == 1'b0)
                 read_data <= mem0[k_idx];
@@ -133,7 +133,7 @@ module act_buffer #(
     end
 
     // Output register (1-cycle latency)
-    always @(posedge clk or negedge rst_n) begin
+    always @(posedge buf_gated_clk or negedge rst_n) begin
         if (!rst_n)
             a_vec <= {TM*8{1'b0}};
         else

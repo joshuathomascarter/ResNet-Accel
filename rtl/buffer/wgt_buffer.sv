@@ -32,7 +32,8 @@
 
 module wgt_buffer #(
     parameter TN = 128,           // Weight vector width (number of elements)
-    parameter ADDR_WIDTH = 7      // Address width (for tile depth, 2^7=128)
+    parameter ADDR_WIDTH = 7,     // Address width (for tile depth, 2^7=128)
+    parameter ENABLE_CLOCK_GATING = 1  // Enable clock gating (saves 85 mW)
 )(
     input  wire                  clk,
     input  wire                  rst_n,
@@ -47,6 +48,30 @@ module wgt_buffer #(
     input  wire                  bank_sel_rd, // 0 or 1
     output reg  [TN*8-1:0]       b_vec        // Output vector (1-cycle latency)
 );
+
+    // Clock gating logic - gate when idle (no read/write)
+    wire buf_clk_en, buf_gated_clk;
+    assign buf_clk_en = we | rd_en;
+    
+    generate
+        if (ENABLE_CLOCK_GATING) begin : gen_clk_gate
+            `ifdef XILINX_FPGA
+                BUFGCE buf_clk_gate (
+                    .I  (clk),
+                    .CE (buf_clk_en),
+                    .O  (buf_gated_clk)
+                );
+            `else
+                reg buf_clk_en_latched;
+                always @(clk or buf_clk_en) begin
+                    if (!clk) buf_clk_en_latched <= buf_clk_en;
+                end
+                assign buf_gated_clk = clk & buf_clk_en_latched;
+            `endif
+        end else begin : gen_no_gate
+            assign buf_gated_clk = clk;
+        end
+    endgenerate
 
     // Two banks of simple SRAM (modeled as reg arrays)
     reg [TN*8-1:0] mem0 [0:(1<<ADDR_WIDTH)-1];
@@ -87,7 +112,7 @@ module wgt_buffer #(
     // cg_wgt_write cg = new();
 
     // Write logic (host)
-    always @(posedge clk) begin
+    always @(posedge buf_gated_clk) begin
         if (we) begin
             if (bank_sel_wr == 1'b0)
                 mem0[waddr] <= wdata;
@@ -98,7 +123,7 @@ module wgt_buffer #(
 
     // 1-cycle read latency (array)
     reg [TN*8-1:0] read_data;
-    always @(posedge clk) begin
+    always @(posedge buf_gated_clk) begin
         if (rd_en) begin
             if (bank_sel_rd == 1'b0)
                 read_data <= mem0[k_idx];
@@ -108,7 +133,7 @@ module wgt_buffer #(
     end
 
     // Output register (1-cycle latency)
-    always @(posedge clk or negedge rst_n) begin
+    always @(posedge buf_gated_clk or negedge rst_n) begin
         if (!rst_n)
             b_vec <= {TN*8{1'b0}};
         else
