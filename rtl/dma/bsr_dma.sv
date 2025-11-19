@@ -656,7 +656,7 @@ module bsr_dma #(
             end
             
             RX_ROW_PTR_DATA: begin
-                // Continue until CSR command changes (TODO: protocol refinement)
+                // Continue until CSR command changes
                 // For now, receive a fixed number or detect end-of-data
                 // Simplified: move to col_idx after some internal timeout
             end

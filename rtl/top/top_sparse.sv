@@ -60,10 +60,31 @@ module top_sparse #(
     wire        dma_meta_ready;
     
     // Metadata decoder → scheduler (BRAM read)
-    wire [7:0] sched_meta_raddr;
-    wire        sched_meta_ren;
-    wire [31:0] sched_meta_rdata;
-    wire        sched_meta_rvalid;
+    wire [7:0]  meta_rd_addr;
+    wire        meta_rd_en;
+    wire [1:0]  meta_rd_type;
+    wire [31:0] meta_rd_data;
+    wire        meta_rd_valid;
+    wire        meta_rd_hit;
+    
+    // Block data BRAM interface
+    wire        block_rd_en;
+    wire [31:0] block_rd_addr;
+    wire [7:0]  block_rd_data;
+    
+    // Block data storage (4KB: 4096 INT8 values)
+    reg [7:0] block_bram [0:4095];
+    reg [11:0] block_bram_rd_addr_r;
+    reg [7:0] block_bram_rd_data_r;
+    
+    always @(posedge clk) begin
+        if (block_rd_en) begin
+            block_bram_rd_addr_r <= block_rd_addr[11:0];
+            block_bram_rd_data_r <= block_bram[block_rd_addr[11:0]];
+        end
+    end
+    
+    assign block_rd_data = block_bram_rd_data_r;
     
     // Metadata decoder status
     wire meta_error;
@@ -79,6 +100,26 @@ module top_sparse #(
     wire [15:0] systolic_block_col;
     wire systolic_ready;
     wire systolic_done;
+    
+    // Activation data (dense input matrix A)
+    reg [7:0] act_data [0:7];
+    reg act_valid;
+    integer i;
+    
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            act_valid <= 1'b0;
+            for (i = 0; i < 8; i = i + 1)
+                act_data[i] <= 8'd0;
+        end else begin
+            // Generate activation data when systolic is ready
+            act_valid <= systolic_ready;
+            if (systolic_ready) begin
+                for (i = 0; i < 8; i = i + 1)
+                    act_data[i] <= 8'd1;  // Simple test pattern
+            end
+        end
+    end
     
     // Systolic output
     wire systolic_result_valid;
@@ -135,10 +176,10 @@ module top_sparse #(
         .dma_meta_type(2'b00),
         .dma_meta_wen(dma_meta_wen),
         .dma_meta_ready(dma_meta_ready),
-        .sched_meta_raddr(sched_meta_raddr),
-        .sched_meta_ren(sched_meta_ren),
-        .sched_meta_rdata(sched_meta_rdata),
-        .sched_meta_rvalid(sched_meta_rvalid),
+        .sched_meta_raddr(meta_rd_addr),
+        .sched_meta_ren(meta_rd_en),
+        .sched_meta_rdata(meta_rd_data),
+        .sched_meta_rvalid(meta_rd_valid),
         .cfg_num_rows(16'd32),
         .cfg_num_cols(16'd32),
         .cfg_total_blocks(32'd512),
@@ -172,18 +213,18 @@ module top_sparse #(
         .cfg_active_layer(3'd0),
         .cfg_layer_ready(),
         
-        // Metadata BRAM read interfaces
-        .row_ptr_rd_en(sched_meta_ren),
-        .row_ptr_rd_addr(sched_meta_raddr),
-        .row_ptr_rd_data(sched_meta_rdata),
-        .col_idx_rd_en(),
-        .col_idx_rd_addr(),
-        .col_idx_rd_data(),
+        // Metadata cache interface
+        .meta_rd_en(meta_rd_en),
+        .meta_rd_addr(meta_rd_addr),
+        .meta_rd_type(meta_rd_type),
+        .meta_rd_data(meta_rd_data),
+        .meta_rd_valid(meta_rd_valid),
+        .meta_rd_hit(meta_rd_hit),
         
-        // Block data BRAM (TODO: connect to block storage)
-        .block_rd_en(),
-        .block_rd_addr(),
-        .block_rd_data(),
+        // Block data BRAM
+        .block_rd_en(block_rd_en),
+        .block_rd_addr(block_rd_addr),
+        .block_rd_data(block_rd_data),
         
         // Systolic array interface
         .systolic_valid(systolic_valid),
@@ -218,8 +259,8 @@ module top_sparse #(
         .block_row(systolic_block_row),
         .block_col(systolic_block_col),
         .ready(systolic_ready),
-        .act_data(),  // TODO: Connect to activation stream
-        .act_valid(1'b0),
+        .act_data(act_data),
+        .act_valid(act_valid),
         .result_valid(systolic_result_valid),
         .result_data(systolic_result_data),
         .result_block_row(systolic_result_row),
@@ -240,7 +281,7 @@ module top_sparse #(
         if (!rst_n) begin
             output_wr_addr <= 10'd0;
         end else begin
-            if (systolic_result_valid) begin
+            if (systolic_result_valid && systolic_result_ready) begin
                 // Store first result column from 2×8 block
                 output_bram[output_wr_addr] <= systolic_result_data[0][0];
                 output_wr_addr <= output_wr_addr + 1'b1;
@@ -248,11 +289,14 @@ module top_sparse #(
         end
     end
     
+    // Always ready to accept results
+    assign systolic_result_ready = 1'b1;
+    
     // ========================================================================
     // Status Outputs
     // ========================================================================
     
-    assign busy = dma_meta_wen | sched_meta_rvalid | systolic_valid | systolic_result_valid;
+    assign busy = dma_meta_wen | meta_rd_valid | systolic_valid | systolic_result_valid;
     assign done_pulse = (output_wr_addr == 10'h3FF) & systolic_result_valid;
     assign error = meta_error;
     
