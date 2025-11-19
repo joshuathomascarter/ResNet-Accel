@@ -345,7 +345,7 @@ def export_model_bsr(model: nn.Module, output_dir: str, quantize: bool = False):
                 block_w=block_w,
                 output_dir=output_dir,
                 quantize=quantize,
-                scales=None,  # TODO: Load from quantization if available
+                scales=quantizer.scale_matrix if hasattr(quantizer, "scale_matrix") and quantize else None,  # Load from quantization if available
             )
 
             # Update statistics
