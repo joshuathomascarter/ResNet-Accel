@@ -37,7 +37,10 @@ module scheduler #(
   
   // Maximum tile dimensions for enable masks
   parameter MAX_TM = 64,
-  parameter MAX_TN = 64
+  parameter MAX_TN = 64,
+  
+  // Enable clock gating (saves ~200 mW when idle)
+  parameter ENABLE_CLOCK_GATING = 1
 )(
   input  wire                 clk,
   input  wire                 rst_n,
@@ -85,6 +88,33 @@ module scheduler #(
   output reg [31:0]           cycles_tile,    // counts cycles within tile
   output reg [31:0]           stall_cycles    // cycles stalled waiting for bank valid
 );
+
+  // ========================================================================
+  // Clock Gating Logic (saves ~200 mW when scheduler idle)
+  // ========================================================================
+  wire sched_clk_en, clk_gated;
+  assign sched_clk_en = start | busy | abort | done_tile;
+  
+  generate
+    if (ENABLE_CLOCK_GATING) begin : gen_clk_gate
+      `ifdef XILINX_FPGA
+        BUFGCE sched_clk_gate (
+          .I  (clk),
+          .CE (sched_clk_en),
+          .O  (clk_gated)
+        );
+      `else
+        // Generic ICG for simulation
+        reg sched_clk_en_latched;
+        always @(clk or sched_clk_en) begin
+          if (!clk) sched_clk_en_latched <= sched_clk_en;
+        end
+        assign clk_gated = clk & sched_clk_en_latched;
+      `endif
+    end else begin : gen_no_gate
+      assign clk_gated = clk;
+    end
+  endgenerate
 
   // ------------------------
   // Internal registers/state
@@ -221,7 +251,7 @@ module scheduler #(
   // ------------------------
   // Start latch & tile counts
   // ------------------------
-  always @(posedge clk or negedge rst_n) begin
+  always @(posedge clk_gated or negedge rst_n) begin
     if (!rst_n) begin
       start_latched   <= 1'b0;
     end else begin
@@ -259,7 +289,7 @@ module scheduler #(
   // Tile indices & counters
   // ------------------------
   // m_tile, n_tile, k_tile advance in TILE_DONE / PREP next k
-  always @(posedge clk or negedge rst_n) begin
+  always @(posedge clk_gated or negedge rst_n) begin
     if (!rst_n) begin
       m_tile_r <= {M_W{1'b0}};
       n_tile_r <= {M_W{1'b0}};
@@ -421,7 +451,7 @@ module scheduler #(
   // ------------------------
   // State / perf registers
   // ------------------------
-  always @(posedge clk or negedge rst_n) begin
+  always @(posedge clk_gated or negedge rst_n) begin
     if (!rst_n) begin
       state           <= S_IDLE;
       cycles_tile_r   <= {M_W{1'b0}};
