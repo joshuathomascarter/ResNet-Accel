@@ -107,6 +107,8 @@
 #include <memory>
 #include <array>
 
+namespace resnet_accel {
+
 // Forward declarations
 class AcceleratorDriver;
 class BSRPacker;
@@ -324,4 +326,7 @@ private:
     void softmax(const float* input, float* output, size_t size);
 };
 
+}  // namespace resnet_accel
+
+#endif  // RESNET_INFERENCE_HPP
 #endif // RESNET_INFERENCE_HPP

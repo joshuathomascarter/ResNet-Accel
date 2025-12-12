@@ -115,6 +115,8 @@
 #include <cstddef>
 #include "bsr_packer.hpp"  // For BSRMatrix
 
+namespace resnet_accel {
+
 /**
  * Golden model function declarations
  * 
@@ -151,7 +153,7 @@ void matmul_int8(const int8_t* A, const int8_t* B, int32_t* C,
  *       Multiply corresponding A columns with block
  *       Accumulate into C
  */
-void bsr_matmul_int8(const int8_t* A, const BSRMatrix& B_bsr, int32_t* C,
+void bsr_matmul_int8(const int8_t* A, const resnet_accel::BSRMatrix& B_bsr, int32_t* C,
                      size_t M, size_t K, size_t N);
 
 // =============================================================================
@@ -180,7 +182,7 @@ void conv2d_int8(const int8_t* input, const int8_t* weight, const int32_t* bias,
 /**
  * 2D Convolution with BSR sparse weights
  */
-void conv2d_bsr_int8(const int8_t* input, const BSRMatrix& weight_bsr,
+void conv2d_bsr_int8(const int8_t* input, const resnet_accel::BSRMatrix& weight_bsr,
                      const int32_t* bias, int32_t* output,
                      size_t batch, size_t in_channels, size_t out_channels,
                      size_t in_height, size_t in_width,
@@ -309,5 +311,6 @@ void im2col_int8(const int8_t* input, int8_t* output,
                  size_t kernel_size, size_t stride, size_t padding);
 
 } // namespace golden
+} // namespace resnet_accel
 
-#endif // GOLDEN_MODELS_HPP
+#endif  // GOLDEN_MODELS_HPP

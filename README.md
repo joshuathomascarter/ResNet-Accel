@@ -1,49 +1,46 @@
 # ACCEL-v1: Sparse CNN Accelerator for FPGA
 
-**A research FPGA accelerator for sparse neural networks.** Built from scratch in 3 months (September - December 2025). Implements row-stationary systolic arrays with BSR sparse format, targeting Zynq-7020.
+**A research FPGA accelerator for sparse neural networks targeting Zynq-7020.**  
+Built from scratch (Sept–Dec 2025). Implements weight-stationary systolic arrays with BSR sparse format.
 
-> **Status**: RTL complete, simulation verified. Ready for synthesis and FPGA deployment.
+> **Status**: RTL complete, simulation verified. Python tooling functional. **C++ host driver in planning phase.**
 
-## Projected Performance Metrics
+---
 
-**Note: These metrics are simulation results and theoretical projections. Hardware validation is pending after synthesis and FPGA deployment.**
+## Performance Targets (Simulation-Based)
 
-| Metric | Projected Value | Status | Notes |
-|--------|-----------------|--------|-------|
-| **Peak Throughput** | 6.4 GOPS | Simulated | Dual-clock design (200 MHz datapath) |
-| **Sparse Speedup** | 6-9x | Estimated | On 70-90% sparse CNNs vs dense baseline |
-| **Memory Efficiency** | 9.7x | Simulated | BSR format (118 KB vs 1.15 MB for MNIST FC1) |
-| **Accuracy** | 98.7% | Validated | vs 98.9% FP32 (0.2% degradation) |
-| **Power Consumption** | 840 mW | Projected | Multi-voltage + clock gating (vs 2.0 W baseline) |
-| **Energy Efficiency** | 183 pJ/op | Estimated | 30% better than single-clock design |
-| **DMA Bandwidth** | 400 MB/s | Simulated | 27,000x faster than UART (15 KB/s) |
+| Metric | Target | Notes |
+|--------|--------|-------|
+| **Peak Throughput** | 6.4 GOPS | 16×16 array @ 200 MHz (256 MACs/cycle) |
+| **Sparse Speedup** | 6–9× | vs dense baseline at 70–90% sparsity |
+| **Memory Reduction** | 9.7× | BSR format (118 KB vs 1.15 MB for MNIST FC1) |
+| **INT8 Accuracy** | 98.7% | MNIST CNN, 0.2% degradation from FP32 |
+| **Power Target** | 840 mW | Dual-clock + clock gating (vs 2.0 W baseline) |
 
-## Key Innovations
+*Hardware validation pending synthesis and FPGA deployment.*
 
-### 1. BSR Sparse Format with Hardware Scheduler
-- Block Sparse Row (BSR) 8x8 blocks optimized for systolic arrays
-- Hardware FSM automatically skips empty rows (90% of rows in sparse networks)
-- Metadata caching reduces BRAM access by 3x
+---
 
-### 2. Aggressive Power Optimization (5 Phases)
-- **Phase 1-2**: Clock gating on control logic (500 mW savings)
-- **Phase 3**: Zero-value bypass in MACs (50 mW savings)
-- **Phase 4**: Multi-voltage domains (0.9V control, 1.0V datapath)
-- **Phase 5**: Dual-clock design (50 MHz control, 200 MHz compute)
-- **Result**: 2.0 W -> 840 mW (58% reduction) + 2x throughput
+## Key Features
 
-### 3. Comprehensive Verification Suite
-- **6,875 lines** of SystemVerilog (clean Verilator lint)
-- **26/26 Python tests** passing (100% pass rate)
-- **100 random stress tests** (matrices, sparsity patterns)
-- **CocoTB integration tests** (AXI protocol verification)
-- **INT8 golden model** (bit-exact reference)
-- **Note**: Validation pending post-synthesis & FPGA implementation
+### Hardware (RTL)
+- **16×16 Weight-Stationary Systolic Array** — INT8×INT8→INT32 accumulation
+- **BSR Sparse Format** — Block Sparse Row with hardware scheduler, skips zero blocks
+- **Dual-Clock Architecture** — 50 MHz control / 200 MHz datapath
+- **AXI4 Interface** — DMA for weights/activations, AXI-Lite for CSR control
+- **Power Optimization** — Clock gating, zero-bypass MACs, multi-voltage support
 
-### 4. Dual Communication Architecture
-- **UART**: Debug interface (15 KB/s, simple protocol)
-- **AXI4 DMA**: Production interface (400 MB/s, 27,000x faster)
-- **CSR Registers**: Runtime configuration (tile sizes, sparsity metadata)
+### Software (Python — Current)
+- **INT8 Quantization** — Per-channel quantization with calibration
+- **BSR Export** — Convert dense weights to hardware-ready sparse format
+- **Golden Models** — Bit-exact reference for verification
+- **CocoTB Testbenches** — AXI protocol verification
+
+### Software (C++ — Planned)
+- **Zynq Host Driver** — Direct hardware control via `/dev/mem`
+- **DMA Memory Manager** — Physically contiguous buffer allocation
+- **BSR Packer** — High-performance sparse format conversion
+- **ResNet-18 Inference** — Full model execution on FPGA
 
 ## Architecture Overview
 
@@ -354,3 +351,4 @@ December 2025
 - Xilinx UltraScale Architecture Clock Resources (UG472)
 - AMBA AXI4 Specification (ARM IHI 0022E)
 - Verilator User Guide (Version 5.0)
+# ACCEL-v1: Sparse CNN Accelerator for FPGA

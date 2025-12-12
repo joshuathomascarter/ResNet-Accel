@@ -1,0 +1,350 @@
+# ResNet-18 Migration Plan: 8×8 → 16×16 Systolic Array
+
+**Author:** Migration Audit Tool  
+**Date:** December 8, 2025  
+**Confidence Level:** HIGH (main code paths), MEDIUM (some edge cases)
+
+---
+
+## Summary
+
+This report provides an **exhaustive migration plan** to run ResNet-18 on a 16×16 systolic array, replacing the current MNIST-focused 8×8 assumptions. The primary mechanical change is updating the block size from 8→16 throughout the Python packing code, SystemVerilog hardware, and C++ testbenches.
+
+### Key Findings:
+1. **Hardware is already parameterized for 16×16**: The RTL (`systolic_array.sv`, `bsr_scheduler.sv`, `accel_top.sv`) uses `N_ROWS=16, N_COLS=16, BLOCK_SIZE=16` parameters. The systolic array, PE, and MAC modules already support 16×16.
+2. **Python BSR packing hardcodes 8×8**: The exporters (`export_bsr.py`, `export_mlp.py`, `gemm_bsr_int8.py`) use `(8, 8)` block dimensions that must become `(16, 16)`.
+3. **Testbenches mix 8×8 and 16×16**: Some SV testbenches (`systolic_tb.sv`, `accel_top_tb.sv`) instantiate with `N_ROWS=8, N_COLS=8`, while others use 16. These need unification.
+4. **C++ tests hardcode `BLOCK_SIZE=8`**: The stress tests and end-to-end tests use constants that must change.
+5. **Memory layout impact**: 16×16 blocks = 256 bytes each (vs 64 bytes for 8×8). This affects DMA burst counts, buffer sizing, and address calculations.
+
+### Risk Level: **MEDIUM**
+- The RTL is already designed for 16×16; the main work is ensuring all Python/C++ tooling matches.
+- ResNet-18 has larger weight matrices that will benefit from 16×16 tiling efficiency.
+
+---
+
+## Per-File Table
+
+### Python Files
+
+| File Path | Role | Requires Change? | Details |
+|-----------|------|------------------|---------|
+| `sw/training/export_bsr.py` | BSR weight exporter | **YES** | Changes `(8, 8)` block sizes to `(16, 16)`, updates `layer_block_cfg()` |
+| `sw/golden/gemm_bsr_int8.py` | Golden BSR GEMM reference | **YES** | Block loop assumes 8×8; update to 16×16 |
+| `sw/exporters/export_mlp.py` | MLP fixture generator | **YES** | Line 38: `block_size=8` → `block_size=16` |
+| `sw/exporters/export_conv.py` | Conv fixture generator | **NO** | Uses 4×4 blocks for conv (appropriate for 3×3 kernels) |
+| `sw/exporters/export_transformer.py` | Transformer fixture generator | **YES** | Line 18: `block_size=8` → `block_size=16` |
+| `sw/python/simulate_array.py` | Array simulator | **NO** | Already uses `size=16` (line 28) |
+| `sw/host/accel.py` | PYNQ driver | **PARTIAL** | Line 97: `BLOCK_SIZE = 16` already correct; verify other constants |
+| `sw/host_axi/run_gemm_axi.py` | AXI GEMM driver | **YES** | Lines 359-361: default Tm/Tn/Tk=8 → 16 |
+| `sw/host_axi/csr_map.py` | CSR address map | **NO** | Just register addresses, not block sizes |
+| `sw/INT8 quantization/quantize.py` | INT8 quantizer | **YES** | Line 24: `Tm, Tn, Tk = 2, 2, 64` should be updated for 16×16 tiles |
+| `sw/MNIST CNN/train_mnist.py` | MNIST trainer | **NO** | Training code, not inference packing |
+| `sw/utils/tile_counts.py` | Tile count calculator | **NO** | Pure math helper, no hardcoded sizes |
+| `sw/tests/test_exporters.py` | Exporter tests | **YES** | Line 23: `block_size=8` assertions need update |
+| `sw/tests/test_golden_models.py` | Golden model tests | **YES** | Lines 52, 81: `build_bsr_from_dense(..., 8, 8)` → 16, 16 |
+| `sw/tests/test_integration.py` | Integration tests | **YES** | Verify tile sizes match 16×16 |
+| `sw/tests/test_mac.py` | MAC unit tests | **NO** | Tests individual MAC ops, not block sizes |
+| `sw/tests/test_csr_pack.py` | CSR packing tests | **NO** | Tests byte packing, not tile sizes |
+| `sw/tests/post_training_quant_tests.py` | PTQ tests | **NO** | Tests quantization accuracy |
+| `sw/golden_models/gemm_int8.py` | CSV-based golden checker | **NO** | Reads CSV files, not block-dependent |
+| `sw/golden_models/golden_mac8.py` | MAC golden model | **NO** | Tests individual MAC, not blocks |
+| `hw/sim/cocotb/test_accel_top.py` | Cocotb testbench | **YES** | Line 259-260: test config uses M=N=64; update for 16×16 tiles |
+
+### SystemVerilog RTL Files
+
+| File Path | Role | Requires Change? | Details |
+|-----------|------|------------------|---------|
+| `hw/rtl/systolic/systolic_array.sv` | Systolic array | **NO** | Already `N_ROWS=16, N_COLS=16` (line 58) |
+| `hw/rtl/systolic/pe.sv` | Processing element | **NO** | User stated PE is updated for residual bypass |
+| `hw/rtl/mac/mac8.sv` | INT8 MAC unit | **NO** | User stated MAC is updated |
+| `hw/rtl/top/accel_top.sv` | Top-level accelerator | **NO** | Lines 16-17: `N_ROWS=16, N_COLS=16` already |
+| `hw/rtl/top/accel_top_dual_clk.sv` | Dual-clock top | **VERIFY** | Check N_ROWS/N_COLS parameters |
+| `hw/rtl/control/bsr_scheduler.sv` | BSR sparse scheduler | **NO** | Line 24: `BLOCK_SIZE=16` already |
+| `hw/rtl/control/scheduler.sv` | Dense scheduler | **NO** | Parameterized |
+| `hw/rtl/control/csr.sv` | CSR registers | **NO** | Just register definitions |
+| `hw/rtl/buffer/act_buffer.sv` | Activation buffer | **YES** | Line 34: `TM=8` → `TM=16` |
+| `hw/rtl/buffer/wgt_buffer.sv` | Weight buffer | **NO** | Line 34: `TN=128` (larger than needed) |
+| `hw/rtl/buffer/output_accumulator.sv` | Output accumulator | **NO** | Lines 21-22: `N_ROWS=16, N_COLS=16` already |
+| `hw/rtl/dma/bsr_dma.sv` | BSR DMA engine | **YES** | Update 64-byte block assumptions (line 238: `64 bytes per 8x8 block`) |
+| `hw/rtl/dma/act_dma.sv` | Activation DMA | **VERIFY** | Check burst sizing |
+| `hw/rtl/meta/meta_decode.sv` | Metadata decoder | **NO** | Block-size agnostic |
+| `hw/rtl/host_iface/axi_lite_slave.sv` | AXI-Lite slave | **NO** | Protocol wrapper |
+| `hw/rtl/host_iface/axi_dma_bridge.sv` | AXI DMA bridge | **NO** | Data width = 64 bits (protocol level) |
+| `hw/rtl/control/multi_layer_buffer.sv` | Multi-layer buffer | **VERIFY** | Check sizing parameters |
+
+### SystemVerilog Testbench Files
+
+| File Path | Role | Requires Change? | Details |
+|-----------|------|------------------|---------|
+| `hw/sim/sv/systolic_tb.sv` | Systolic array TB | **YES** | Lines 10-11: `N_ROWS=8, N_COLS=8` → 16 |
+| `hw/sim/sv/accel_top_tb.sv` | Top-level TB | **YES** | Lines 84-85: `.N_ROWS(8), .N_COLS(8)` → 16 |
+| `hw/sim/sv/accel_top_tb_full.sv` | Full top TB | **VERIFY** | Check instantiation parameters |
+| `hw/sim/sv/bsr_dma_tb.sv` | BSR DMA TB | **YES** | Line 238: `64 bytes per 8x8 block` → 256 bytes |
+| `hw/sim/sv/integration_tb.sv` | Integration TB | **VERIFY** | Check tile size configs |
+| `hw/sim/sv/output_accumulator_tb.sv` | Accumulator TB | **NO** | Lines 10-11: `N_ROWS=16, N_COLS=16` already |
+| `hw/sim/sv/pe_tb.sv` | PE TB | **NO** | Single PE test |
+
+### C++ Test Files
+
+| File Path | Role | Requires Change? | Details |
+|-----------|------|------------------|---------|
+| `hw/sim/cpp/test_systolic_array.cpp` | Systolic array test | **YES** | Uses 16×16 matrices already but verify constants |
+| `hw/sim/cpp/test_end_to_end_sparse.cpp` | E2E sparse test | **YES** | Line 49: `block_size = 8` → 16 |
+| `hw/sim/cpp/test_stress.cpp` | Stress test | **YES** | Line 35: `BLOCK_SIZE = 8` → 16 |
+| `hw/sim/cpp/test_mac8.cpp` | MAC unit test | **NO** | Individual MAC test |
+| `hw/sim/cpp/test_pe.cpp` | PE test | **NO** | Individual PE test |
+| `hw/sim/cpp/test_buffer_subsystem.cpp` | Buffer test | **VERIFY** | Check buffer sizing |
+| `hw/sim/cpp/test_csr.cpp` | CSR test | **NO** | Register access test |
+| `hw/sim/cpp/test_scheduler.cpp` | Scheduler test | **VERIFY** | Check block assumptions |
+
+---
+
+## Detailed File Changes
+
+### 1. `sw/training/export_bsr.py`
+
+**Lines 50-52:** Change default block configuration for Linear layers:
+```python
+# BEFORE (line 50-52):
+def layer_block_cfg(name, module):
+    """Return block size and minimum keep percentage for each layer"""
+    if isinstance(module, nn.Conv2d):
+        return (4, 4), 0.30  # 4x4 blocks
+    else:  # Linear
+        return (8, 8), 0.05  # 8x8 blocks
+
+# AFTER:
+def layer_block_cfg(name, module):
+    """Return block size and minimum keep percentage for each layer"""
+    if isinstance(module, nn.Conv2d):
+        return (4, 4), 0.30  # 4x4 blocks for convolutions
+    else:  # Linear
+        return (16, 16), 0.05  # 16x16 blocks for FC layers (match systolic)
+```
+
+### 2. `sw/golden/gemm_bsr_int8.py`
+
+**Lines 26-27 (comments):** Update documentation:
+```python
+# BEFORE:
+# - B: Sparse INT8 matrix [K, N] in BSR format (only non-zero 8×8 blocks stored)
+
+# AFTER:
+# - B: Sparse INT8 matrix [K, N] in BSR format (only non-zero 16×16 blocks stored)
+```
+
+**Line 192-194 (test):** Update test code:
+```python
+# BEFORE:
+bsr_B = build_bsr_from_dense(B, 8, 8)
+
+# AFTER:
+bsr_B = build_bsr_from_dense(B, 16, 16)
+```
+
+### 3. `sw/exporters/export_mlp.py`
+
+**Line 38:**
+```python
+# BEFORE:
+mask = create_sparse_mask(weights.shape, sparsity_pct, block_size=8, seed=seed)
+
+# AFTER:
+mask = create_sparse_mask(weights.shape, sparsity_pct, block_size=16, seed=seed)
+```
+
+**Lines 75-76:**
+```python
+# BEFORE:
+bsr = build_bsr_from_dense(mlp["weights"], 8, 8)
+
+# AFTER:
+bsr = build_bsr_from_dense(mlp["weights"], 16, 16)
+```
+
+### 4. `sw/exporters/export_transformer.py`
+
+**Line 18 (create_sparse_mask default):** Already parameterized, but callers may hardcode 8.
+
+**Lines 83-85:**
+```python
+# BEFORE:
+Q_mask = create_sparse_mask(Q.shape, sparsity_pct, block_size=8, seed=seed)
+K_mask = create_sparse_mask(K.shape, sparsity_pct, block_size=8, seed=seed + 1)
+V_mask = create_sparse_mask(V.shape, sparsity_pct, block_size=8, seed=seed + 2)
+
+# AFTER:
+Q_mask = create_sparse_mask(Q.shape, sparsity_pct, block_size=16, seed=seed)
+K_mask = create_sparse_mask(K.shape, sparsity_pct, block_size=16, seed=seed + 1)
+V_mask = create_sparse_mask(V.shape, sparsity_pct, block_size=16, seed=seed + 2)
+```
+
+### 5. `sw/host_axi/run_gemm_axi.py`
+
+**Lines 359-361:**
+```python
+# BEFORE:
+parser.add_argument("--Tm", type=int, default=8, help="Tile height")
+parser.add_argument("--Tn", type=int, default=8, help="Tile width")
+parser.add_argument("--Tk", type=int, default=8, help="Tile depth")
+
+# AFTER:
+parser.add_argument("--Tm", type=int, default=16, help="Tile height (systolic rows)")
+parser.add_argument("--Tn", type=int, default=16, help="Tile width (systolic cols)")
+parser.add_argument("--Tk", type=int, default=16, help="Tile depth (K reduction)")
+```
+
+### 6. `sw/INT8 quantization/quantize.py`
+
+**Line 24:**
+```python
+# BEFORE:
+Tm, Tn, Tk = 2, 2, 64
+
+# AFTER:
+Tm, Tn, Tk = 16, 16, 64  # Match 16x16 systolic array
+```
+
+### 7. `hw/rtl/buffer/act_buffer.sv`
+
+**Line 34:**
+```systemverilog
+// BEFORE:
+parameter TM = 8,           // Activation vector width (number of elements)
+
+// AFTER:
+parameter TM = 16,          // Activation vector width (matches N_ROWS)
+```
+
+### 8. `hw/rtl/dma/bsr_dma.sv`
+
+**Line 238 and related comments:**
+```systemverilog
+// BEFORE (line 238):
+for (j = 0; j < 64; j = j + 1) begin  // 64 bytes per 8x8 block
+
+// AFTER:
+for (j = 0; j < 256; j = j + 1) begin  // 256 bytes per 16x16 block
+```
+
+**Add parameter for block bytes:**
+```systemverilog
+// Add after line 30:
+localparam BLOCK_BYTES = 256;  // 16x16 INT8 = 256 bytes per block
+```
+
+### 9. `hw/sim/sv/systolic_tb.sv`
+
+**Lines 10-11:**
+```systemverilog
+// BEFORE:
+localparam N_ROWS = 8;
+localparam N_COLS = 8;
+
+// AFTER:
+localparam N_ROWS = 16;
+localparam N_COLS = 16;
+```
+
+### 10. `hw/sim/sv/accel_top_tb.sv`
+
+**Lines 84-85:**
+```systemverilog
+// BEFORE:
+.N_ROWS     (8),
+.N_COLS     (8),
+
+// AFTER:
+.N_ROWS     (16),
+.N_COLS     (16),
+```
+
+### 11. `hw/sim/sv/bsr_dma_tb.sv`
+
+**Line 331 (init_bsr_memory call):**
+```systemverilog
+// BEFORE:
+init_bsr_memory(8, 8, 8);
+
+// AFTER:
+init_bsr_memory(16, 16, total_blocks);  // 16x16 block rows/cols
+```
+
+**Lines 238-240 (memory layout):**
+```systemverilog
+// BEFORE:
+for (j = 0; j < 64; j = j + 1) begin  // 64 bytes per 8x8 block
+    addr = weights_start + i * 64 + j;
+    memory[addr] = ((i * 64 + j + 1) & 8'hFF);  // Test pattern
+
+// AFTER:
+for (j = 0; j < 256; j = j + 1) begin  // 256 bytes per 16x16 block
+    addr = weights_start + i * 256 + j;
+    memory[addr] = ((i * 256 + j + 1) & 8'hFF);  // Test pattern
+```
+
+### 12. `hw/sim/cpp/test_stress.cpp`
+
+**Line 35:**
+```cpp
+// BEFORE:
+constexpr int BLOCK_SIZE = 8;
+
+// AFTER:
+constexpr int BLOCK_SIZE = 16;
+```
+
+### 13. `hw/sim/cpp/test_end_to_end_sparse.cpp`
+
+**Line 49:**
+```cpp
+// BEFORE:
+mat.block_size = 8;
+
+// AFTER:
+mat.block_size = 16;
+```
+
+---
+
+## Tests to Run After Edits
+
+### Python Tests
+```bash
+cd sw
+pytest tests/test_exporters.py -v
+pytest tests/test_golden_models.py -v
+pytest tests/test_integration.py -v
+python -c "from training.export_bsr import build_bsr_from_dense; import numpy as np; w=np.random.randn(64,64).astype('float32'); bsr=build_bsr_from_dense(w,16,16); print('Blocks:', bsr['num_blocks'])"
+```
+
+### SystemVerilog Simulation
+```bash
+cd hw/sim
+# Check for available simulators:
+ls Makefile*
+cat README.md
+
+# If using Verilator:
+make -f Makefile.verilator test_systolic_array
+make -f Makefile.verilator test_accel_top
+
+# If using Icarus Verilog:
+iverilog -g2012 -o systolic_tb.vvp sv/systolic_tb.sv ../rtl/systolic/*.sv ../rtl/mac/*.sv
+vvp systolic_tb.vvp
+
+# If using VCS (academic/commercial):
+vcs -sverilog -full64 sv/accel_top_tb.sv ../rtl/**/*.sv -o simv && ./simv
+```
+
+### C++ Tests
+```bash
+cd hw/sim/cpp
+# If using Verilator + GTest:
+make -f ../Makefile.verilator test_stress
+./build/Vaccel_top_stress
+
+# Standalone compile:
+g++ -std=c++17 -o test_systolic_array test_systolic_array.cpp && ./test_systolic_array
+io

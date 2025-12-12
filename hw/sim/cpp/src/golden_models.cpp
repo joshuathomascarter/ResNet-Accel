@@ -1,438 +1,371 @@
 /**
- * ╔═══════════════════════════════════════════════════════════════════════════╗
- * ║                        GOLDEN_MODELS.CPP                                  ║
- * ╠═══════════════════════════════════════════════════════════════════════════╣
- * ║  IMPLEMENTS: golden_models.hpp                                            ║
- * ║  REPLACES: sw/golden_models/conv_golden.py                               ║
- * ║            sw/golden_models/matmul_golden.py                             ║
- * ║            sw/golden/sparse_matmul.py                                    ║
- * ╠═══════════════════════════════════════════════════════════════════════════╣
- * ║                                                                           ║
- * ║  CRITICAL: These implementations must be BIT-EXACT with hardware!        ║
- * ║                                                                           ║
- * ║  WHAT YOU NEED TO IMPLEMENT:                                              ║
- * ║                                                                           ║
- * ║  ═══════════════════════════════════════════════════════════════════════  ║
- * ║  matmul_int8() - Dense matrix multiply                                   ║
- * ║  ═══════════════════════════════════════════════════════════════════════  ║
- * ║                                                                           ║
- * ║  C[M,N] = A[M,K] @ B[K,N]                                                 ║
- * ║  INT8 inputs, INT32 output                                                ║
- * ║                                                                           ║
- * ║  for (m = 0; m < M; m++) {                                                ║
- * ║      for (n = 0; n < N; n++) {                                            ║
- * ║          int32_t acc = 0;                                                 ║
- * ║          for (k = 0; k < K; k++) {                                        ║
- * ║              acc += (int32_t)A[m*K + k] * (int32_t)B[k*N + n];            ║
- * ║          }                                                                ║
- * ║          C[m*N + n] = acc;                                                ║
- * ║      }                                                                    ║
- * ║  }                                                                        ║
- * ║                                                                           ║
- * ║  ═══════════════════════════════════════════════════════════════════════  ║
- * ║  bsr_matmul_int8() - Sparse matrix multiply (KEY FUNCTION!)              ║
- * ║  ═══════════════════════════════════════════════════════════════════════  ║
- * ║                                                                           ║
- * ║  C[M,N] = A[M,K] @ B_bsr[K,N]                                             ║
- * ║  A is dense, B is in BSR format with 16x16 blocks                        ║
- * ║                                                                           ║
- * ║  // Initialize output to zero                                            ║
- * ║  memset(C, 0, M * N * sizeof(int32_t));                                   ║
- * ║                                                                           ║
- * ║  // For each block row in B                                               ║
- * ║  for (br = 0; br < B_bsr.num_block_rows; br++) {                          ║
- * ║      // For each non-zero block in this row                               ║
- * ║      for (idx = B_bsr.row_ptr[br]; idx < B_bsr.row_ptr[br+1]; idx++) {    ║
- * ║          bc = B_bsr.col_idx[idx];  // Block column                        ║
- * ║          block = &B_bsr.data[idx * 256];  // 16x16 block data             ║
- * ║                                                                           ║
- * ║          // Multiply A columns [br*16 : br*16+16] with this block         ║
- * ║          // Accumulate into C columns [bc*16 : bc*16+16]                  ║
- * ║          for (m = 0; m < M; m++) {                                        ║
- * ║              for (j = 0; j < 16; j++) {  // block col                     ║
- * ║                  n = bc * 16 + j;                                         ║
- * ║                  if (n >= N) continue;                                    ║
- * ║                                                                           ║
- * ║                  int32_t acc = 0;                                         ║
- * ║                  for (i = 0; i < 16; i++) {  // block row                 ║
- * ║                      k = br * 16 + i;                                     ║
- * ║                      if (k >= K) continue;                                ║
- * ║                      acc += (int32_t)A[m*K + k] * (int32_t)block[i*16+j]; ║
- * ║                  }                                                        ║
- * ║                  C[m*N + n] += acc;                                       ║
- * ║              }                                                            ║
- * ║          }                                                                ║
- * ║      }                                                                    ║
- * ║  }                                                                        ║
- * ║                                                                           ║
- * ║  ═══════════════════════════════════════════════════════════════════════  ║
- * ║  conv2d_int8() - 2D Convolution using im2col + matmul                    ║
- * ║  ═══════════════════════════════════════════════════════════════════════  ║
- * ║                                                                           ║
- * ║  im2col transforms:                                                       ║
- * ║    input[C_in, H, W] + kernel[C_out, C_in, K, K]                          ║
- * ║  into:                                                                    ║
- * ║    A[H_out * W_out, C_in * K * K] @ B[C_in * K * K, C_out]                ║
- * ║                                                                           ║
- * ║  Steps:                                                                   ║
- * ║    1. im2col: Extract patches from input, reshape to matrix              ║
- * ║    2. matmul: Multiply patch matrix with reshaped weights                ║
- * ║    3. Add bias (if provided)                                              ║
- * ║    4. Reshape output to [C_out, H_out, W_out]                             ║
- * ║                                                                           ║
- * ║  ═══════════════════════════════════════════════════════════════════════  ║
- * ║  requantize_int32_to_int8() - Layer output to next layer input           ║
- * ║  ═══════════════════════════════════════════════════════════════════════  ║
- * ║                                                                           ║
- * ║  output = round(input * in_scale / out_scale)                             ║
- * ║  with saturation to [-128, 127]                                           ║
- * ║                                                                           ║
- * ║  Use round-half-to-even (banker's rounding) to match hardware:            ║
- * ║    std::nearbyint() or std::rint() with FE_TONEAREST                      ║
- * ║                                                                           ║
- * ║  for (i = 0; i < size; i++) {                                             ║
- * ║      float scaled = input[i] * in_scale / out_scale;                      ║
- * ║      int32_t rounded = static_cast<int32_t>(std::nearbyint(scaled));      ║
- * ║      // Saturate                                                          ║
- * ║      if (rounded > 127) rounded = 127;                                    ║
- * ║      if (rounded < -128) rounded = -128;                                  ║
- * ║      output[i] = static_cast<int8_t>(rounded);                            ║
- * ║  }                                                                        ║
- * ║                                                                           ║
- * ╚═══════════════════════════════════════════════════════════════════════════╝
+ * @file golden_models.cpp
+ * @brief Bit-exact reference implementations matching hardware
+ * @author ResNet-Accel Team
+ * @date 2024
  */
 
 #include "golden_models.hpp"
-
+#include "bsr_packer.hpp"
 #include <cmath>
 #include <cstring>
 #include <algorithm>
 #include <cfenv>
-#include <cstdio>
+#include <vector>
 
+namespace resnet_accel {
 namespace golden {
 
-// =============================================================================
+//==============================================================================
 // Matrix Operations
-// =============================================================================
+//==============================================================================
 
-void matmul_int8(const int8_t* A, const int8_t* B, int32_t* C,
-                 size_t M, size_t K, size_t N) {
-    // TODO: Implement basic matrix multiply
-    //
-    // for (size_t m = 0; m < M; m++) {
-    //     for (size_t n = 0; n < N; n++) {
-    //         int32_t acc = 0;
-    //         for (size_t k = 0; k < K; k++) {
-    //             acc += static_cast<int32_t>(A[m * K + k]) * 
-    //                    static_cast<int32_t>(B[k * N + n]);
-    //         }
-    //         C[m * N + n] = acc;
-    //     }
-    // }
+void matmul_int8(const std::int8_t* A, const std::int8_t* B, std::int32_t* C,
+                 std::size_t M, std::size_t K, std::size_t N) {
+    for (std::size_t m = 0; m < M; ++m) {
+        for (std::size_t n = 0; n < N; ++n) {
+            std::int32_t acc = 0;
+            for (std::size_t k = 0; k < K; ++k) {
+                acc += static_cast<std::int32_t>(A[m * K + k]) * 
+                       static_cast<std::int32_t>(B[k * N + n]);
+            }
+            C[m * N + n] = acc;
+        }
+    }
 }
 
-void bsr_matmul_int8(const int8_t* A, const BSRMatrix& B_bsr, int32_t* C,
-                     size_t M, size_t K, size_t N) {
-    // TODO: Implement sparse matrix multiply - THIS IS THE KEY FUNCTION
-    //
-    // // Initialize output to zero
-    // std::memset(C, 0, M * N * sizeof(int32_t));
-    //
-    // // Iterate over block rows of B
-    // for (size_t br = 0; br < B_bsr.num_block_rows; br++) {
-    //     // Iterate over non-zero blocks in this row
-    //     for (size_t idx = B_bsr.row_ptr[br]; idx < B_bsr.row_ptr[br + 1]; idx++) {
-    //         size_t bc = B_bsr.col_idx[idx];
-    //         const int8_t* block = &B_bsr.data[idx * BSR_BLOCK_ELEMENTS];
-    //
-    //         // Multiply A columns with this block, accumulate to C
-    //         for (size_t m = 0; m < M; m++) {
-    //             for (size_t j = 0; j < BSR_BLOCK_SIZE; j++) {
-    //                 size_t n = bc * BSR_BLOCK_SIZE + j;
-    //                 if (n >= N) continue;
-    //
-    //                 int32_t acc = 0;
-    //                 for (size_t i = 0; i < BSR_BLOCK_SIZE; i++) {
-    //                     size_t k = br * BSR_BLOCK_SIZE + i;
-    //                     if (k >= K) continue;
-    //                     acc += static_cast<int32_t>(A[m * K + k]) *
-    //                            static_cast<int32_t>(block[i * BSR_BLOCK_SIZE + j]);
-    //                 }
-    //                 C[m * N + n] += acc;
-    //             }
-    //         }
-    //     }
-    // }
+void bsr_matmul_int8(const std::int8_t* A, const BSRMatrix& B_bsr, std::int32_t* C,
+                     std::size_t M, std::size_t K, std::size_t N) {
+    // Zero initialize output
+    std::memset(C, 0, M * N * sizeof(std::int32_t)); //Fully initialises the C full int32 matrix to 0 before computation starts
+    
+    // Iterate over block rows of B
+    for (std::size_t br = 0; br < B_bsr.num_block_rows; ++br) { //goes thru the rows of data in a 4 x 4 itll be 0 -> 1 -> 2 -> 3
+        // Iterate over non-zero blocks in this row
+        for (std::size_t idx = B_bsr.row_ptr[br]; idx < B_bsr.row_ptr[br + 1]; ++idx) {
+            std::size_t bc = B_bsr.col_idx[idx]; // finds the col index in the array of non-zero
+            const std::int8_t* block = &B_bsr.data[idx * BSR_BLOCK_ELEMENTS]; //grabs the data for that specific block
+            
+            // Multiply A columns with this block, accumulate to C
+            for (std::size_t m = 0; m < M; ++m) { //iterates thru the A matrix rows 
+                for (std::size_t j = 0; j < BSR_BLOCK_SIZE; ++j) { //finds the specific col in the small block (0 to block_size-1)
+                    std::size_t n = bc * BSR_BLOCK_SIZE + j; // finds which col we are in the full matrix
+                    if (n >= N) continue;
+
+                    
+                    std::int32_t acc = 0;
+                    for (std::size_t i = 0; i < BSR_BLOCK_SIZE; ++i) {
+                        std::size_t k = br * BSR_BLOCK_SIZE + i;
+                        if (k >= K) continue;
+                        acc += static_cast<std::int32_t>(A[m * K + k]) *
+                               static_cast<std::int32_t>(block[i * BSR_BLOCK_SIZE + j]);
+                    }
+                    C[m * N + n] += acc;
+                }
+            }
+        }
+    }
 }
 
-// =============================================================================
-// Convolution Operations
-// =============================================================================
-
-void im2col_int8(const int8_t* input, int8_t* output,
-                 size_t channels, size_t height, size_t width,
-                 size_t kernel_size, size_t stride, size_t padding) {
-    // TODO: Implement im2col transformation
-    //
-    // size_t out_h = (height + 2 * padding - kernel_size) / stride + 1;
-    // size_t out_w = (width + 2 * padding - kernel_size) / stride + 1;
-    // size_t patch_size = channels * kernel_size * kernel_size;
-    //
-    // size_t col_idx = 0;
-    // for (size_t oh = 0; oh < out_h; oh++) {
-    //     for (size_t ow = 0; ow < out_w; ow++) {
-    //         // Extract one patch
-    //         for (size_t c = 0; c < channels; c++) {
-    //             for (size_t kh = 0; kh < kernel_size; kh++) {
-    //                 for (size_t kw = 0; kw < kernel_size; kw++) {
-    //                     int h = oh * stride + kh - padding;
-    //                     int w = ow * stride + kw - padding;
-    //                     
-    //                     if (h >= 0 && h < height && w >= 0 && w < width) {
-    //                         output[col_idx] = input[c * height * width + h * width + w];
-    //                     } else {
-    //                         output[col_idx] = 0;  // Zero padding
-    //                     }
-    //                     col_idx++;
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }
-}
-
-void conv2d_int8(const int8_t* input, const int8_t* weight, const int32_t* bias,
-                 int32_t* output,
-                 size_t batch, size_t in_channels, size_t out_channels,
-                 size_t in_height, size_t in_width,
-                 size_t kernel_size, size_t stride, size_t padding) {
-    // TODO: Implement using im2col + matmul
-    //
-    // size_t out_height = (in_height + 2 * padding - kernel_size) / stride + 1;
-    // size_t out_width = (in_width + 2 * padding - kernel_size) / stride + 1;
-    //
-    // // im2col dimensions
-    // size_t M = out_height * out_width;  // Number of patches
-    // size_t K = in_channels * kernel_size * kernel_size;  // Patch size
-    // size_t N = out_channels;  // Output channels
-    //
-    // for (size_t b = 0; b < batch; b++) {
-    //     // 1. im2col on input
-    //     std::vector<int8_t> col(M * K);
-    //     im2col_int8(&input[b * in_channels * in_height * in_width],
-    //                 col.data(), in_channels, in_height, in_width,
-    //                 kernel_size, stride, padding);
-    //
-    //     // 2. matmul: col @ weight^T
-    //     // Weight is [out_channels, in_channels, K, K], reshape to [K, N]
-    //     // Actually need to transpose weight appropriately
-    //     matmul_int8(col.data(), weight, 
-    //                 &output[b * out_channels * out_height * out_width],
-    //                 M, K, N);
-    //
-    //     // 3. Add bias
-    //     if (bias) {
-    //         for (size_t n = 0; n < N; n++) {
-    //             for (size_t m = 0; m < M; m++) {
-    //                 output[b * N * M + m * N + n] += bias[n];
-    //             }
-    //         }
-    //     }
-    // }
-}
-
-void conv2d_bsr_int8(const int8_t* input, const BSRMatrix& weight_bsr,
-                     const int32_t* bias, int32_t* output,
-                     size_t batch, size_t in_channels, size_t out_channels,
-                     size_t in_height, size_t in_width,
-                     size_t kernel_size, size_t stride, size_t padding) {
-    // TODO: Implement using im2col + bsr_matmul
-    // Same as conv2d_int8 but use bsr_matmul_int8 instead of matmul_int8
-}
-
-// =============================================================================
+//==============================================================================
 // Activation Functions
-// =============================================================================
+//==============================================================================
 
-void relu_int8(int8_t* data, size_t size) {
-    // TODO: Implement
-    // for (size_t i = 0; i < size; i++) {
-    //     if (data[i] < 0) data[i] = 0;
-    // }
+void relu_int8(std::int8_t* data, std::size_t size) {
+    for (std::size_t i = 0; i < size; ++i) {
+        if (data[i] < 0) data[i] = 0;
+    }
 }
 
-void relu_int32(int32_t* data, size_t size) {
-    // TODO: Implement
-    // for (size_t i = 0; i < size; i++) {
-    //     if (data[i] < 0) data[i] = 0;
-    // }
+void relu_int32(std::int32_t* data, std::size_t size) {
+    for (std::size_t i = 0; i < size; ++i) {
+        if (data[i] < 0) data[i] = 0;
+    }
 }
 
-void relu6_int8(int8_t* data, size_t size, float scale) {
-    // TODO: Implement
-    // int8_t max_val = static_cast<int8_t>(std::min(127.0f, 6.0f / scale));
-    // for (size_t i = 0; i < size; i++) {
-    //     if (data[i] < 0) data[i] = 0;
-    //     if (data[i] > max_val) data[i] = max_val;
-    // }
+void relu6_int8(std::int8_t* data, std::size_t size, float scale) {
+    std::int8_t max_val = static_cast<std::int8_t>(6.0f / scale);
+    for (std::size_t i = 0; i < size; ++i) {
+        if (data[i] < 0) data[i] = 0;
+        if (data[i] > max_val) data[i] = max_val;
+    }
 }
 
-// =============================================================================
+//==============================================================================
+// Quantization
+//==============================================================================
+
+void requantize_int32_to_int8(const std::int32_t* input, std::int8_t* output,
+                               std::size_t size, float in_scale, float out_scale) {
+    std::fesetround(FE_TONEAREST);  // Banker's rounding
+    float scale_factor = in_scale / out_scale;
+    
+    for (std::size_t i = 0; i < size; ++i) {
+        float scaled = static_cast<float>(input[i]) * scale_factor;
+        std::int32_t rounded = static_cast<std::int32_t>(std::nearbyint(scaled));
+
+        // Saturate to INT8 range
+        if (rounded > 127) rounded = 127;
+        if (rounded < -128) rounded = -128;
+        
+        output[i] = static_cast<std::int8_t>(rounded);
+    }
+}
+
+//==============================================================================
+// Element-wise Operations
+//==============================================================================
+
+void add_residual_int8(const std::int8_t* main, const std::int8_t* residual,
+                       std::int8_t* output, std::size_t size,
+                       float main_scale, float residual_scale, float out_scale) {
+    for (std::size_t i = 0; i < size; ++i) {
+        // Dequantize both inputs
+        float main_val = static_cast<float>(main[i]) * main_scale;
+        float res_val = static_cast<float>(residual[i]) * residual_scale;
+        
+        // Add in floating point
+        float sum = main_val + res_val;
+        
+        // Requantize to output scale
+        std::int32_t quantized = static_cast<std::int32_t>(
+            std::nearbyint(sum / out_scale));
+        
+        // Saturate
+        if (quantized > 127) quantized = 127;
+        if (quantized < -128) quantized = -128;
+        
+        output[i] = static_cast<std::int8_t>(quantized);
+    }
+}
+
+//==============================================================================
 // Pooling Operations
-// =============================================================================
+//==============================================================================
 
-void maxpool2d_int8(const int8_t* input, int8_t* output,
-                    size_t channels, size_t in_height, size_t in_width,
-                    size_t pool_size, size_t stride) {
-    // TODO: Implement
-    //
-    // size_t out_height = (in_height - pool_size) / stride + 1;
-    // size_t out_width = (in_width - pool_size) / stride + 1;
-    //
-    // for (size_t c = 0; c < channels; c++) {
-    //     for (size_t oh = 0; oh < out_height; oh++) {
-    //         for (size_t ow = 0; ow < out_width; ow++) {
-    //             int8_t max_val = -128;
-    //             for (size_t ph = 0; ph < pool_size; ph++) {
-    //                 for (size_t pw = 0; pw < pool_size; pw++) {
-    //                     size_t ih = oh * stride + ph;
-    //                     size_t iw = ow * stride + pw;
-    //                     int8_t val = input[c * in_height * in_width + ih * in_width + iw];
-    //                     if (val > max_val) max_val = val;
-    //                 }
-    //             }
-    //             output[c * out_height * out_width + oh * out_width + ow] = max_val;
-    //         }
-    //     }
-    // }
-}
-
-void avgpool_global_int8(const int8_t* input, int32_t* output,
-                         size_t channels, size_t height, size_t width) {
-    // TODO: Implement
-    //
-    // for (size_t c = 0; c < channels; c++) {
-    //     int32_t sum = 0;
-    //     for (size_t h = 0; h < height; h++) {
-    //         for (size_t w = 0; w < width; w++) {
-    //             sum += input[c * height * width + h * width + w];
-    //         }
-    //     }
-    //     output[c] = sum;  // Caller divides by (height * width)
-    // }
-}
-
-// =============================================================================
-// Residual Operations
-// =============================================================================
-
-void add_residual(const int32_t* main, const int8_t* residual, int32_t* output,
-                  size_t size, float main_scale, float residual_scale) {
-    // TODO: Implement with scale handling
-    //
-    // // Both paths need to be in same scale for addition
-    // // Output = main + dequant(residual) * (residual_scale / main_scale)
-    // float scale_ratio = residual_scale / main_scale;
-    //
-    // for (size_t i = 0; i < size; i++) {
-    //     float residual_scaled = static_cast<float>(residual[i]) * scale_ratio;
-    //     output[i] = main[i] + static_cast<int32_t>(std::nearbyint(residual_scaled));
-    // }
-}
-
-// =============================================================================
-// Quantization Operations
-// =============================================================================
-
-void requantize_int32_to_int8(const int32_t* input, int8_t* output,
-                               size_t size, float in_scale, float out_scale) {
-    // TODO: Implement with proper rounding
-    //
-    // float multiplier = in_scale / out_scale;
-    //
-    // // Set rounding mode to round-half-to-even
-    // std::fesetround(FE_TONEAREST);
-    //
-    // for (size_t i = 0; i < size; i++) {
-    //     float scaled = static_cast<float>(input[i]) * multiplier;
-    //     int32_t rounded = static_cast<int32_t>(std::nearbyint(scaled));
-    //
-    //     // Saturate to INT8 range
-    //     if (rounded > 127) rounded = 127;
-    //     if (rounded < -128) rounded = -128;
-    //
-    //     output[i] = static_cast<int8_t>(rounded);
-    // }
-}
-
-void quantize_float_to_int8(const float* input, int8_t* output,
-                            size_t size, float scale) {
-    // TODO: Implement
-    //
-    // std::fesetround(FE_TONEAREST);
-    //
-    // for (size_t i = 0; i < size; i++) {
-    //     float scaled = input[i] / scale;
-    //     int32_t rounded = static_cast<int32_t>(std::nearbyint(scaled));
-    //
-    //     if (rounded > 127) rounded = 127;
-    //     if (rounded < -128) rounded = -128;
-    //
-    //     output[i] = static_cast<int8_t>(rounded);
-    // }
-}
-
-void dequantize_int8_to_float(const int8_t* input, float* output,
-                              size_t size, float scale) {
-    // TODO: Implement
-    //
-    // for (size_t i = 0; i < size; i++) {
-    //     output[i] = static_cast<float>(input[i]) * scale;
-    // }
-}
-
-// =============================================================================
-// Utility Functions
-// =============================================================================
-
-size_t compare_buffers_int8(const int8_t* expected, const int8_t* actual,
-                            size_t size, bool print_mismatches) {
-    size_t mismatches = 0;
+void maxpool2d_int8(const std::int8_t* input, std::int8_t* output,
+                    std::size_t H, std::size_t W, std::size_t C,
+                    std::size_t pool_size, std::size_t stride) {
+    std::size_t H_out = (H - pool_size) / stride + 1;
+    std::size_t W_out = (W - pool_size) / stride + 1;
     
-    // TODO: Implement
-    //
-    // for (size_t i = 0; i < size; i++) {
-    //     if (expected[i] != actual[i]) {
-    //         mismatches++;
-    //         if (print_mismatches && mismatches <= 10) {
-    //             printf("Mismatch at %zu: expected %d, got %d\n",
-    //                    i, expected[i], actual[i]);
-    //         }
-    //     }
-    // }
-    
-    return mismatches;
+    for (std::size_t c = 0; c < C; ++c) {
+        for (std::size_t oh = 0; oh < H_out; ++oh) {
+            for (std::size_t ow = 0; ow < W_out; ++ow) {
+                std::int8_t max_val = -128;
+                
+                for (std::size_t ph = 0; ph < pool_size; ++ph) {
+                    for (std::size_t pw = 0; pw < pool_size; ++pw) {
+                        std::size_t h = oh * stride + ph;
+                        std::size_t w = ow * stride + pw;
+                        std::int8_t val = input[c * H * W + h * W + w];
+                        if (val > max_val) max_val = val;
+                    }
+                }
+                
+                output[c * H_out * W_out + oh * W_out + ow] = max_val;
+            }
+        }
+    }
 }
 
-size_t compare_buffers_int32(const int32_t* expected, const int32_t* actual,
-                             size_t size, bool print_mismatches) {
-    size_t mismatches = 0;
-    
-    // TODO: Implement (same as int8 version)
-    
-    return mismatches;
+void avgpool_global_int8(const std::int8_t* input, std::int8_t* output,
+                         std::size_t H, std::size_t W, std::size_t C) {
+    for (std::size_t c = 0; c < C; ++c) {
+        std::int32_t sum = 0;
+        for (std::size_t h = 0; h < H; ++h) {
+            for (std::size_t w = 0; w < W; ++w) {
+                sum += static_cast<std::int32_t>(input[c * H * W + h * W + w]);
+            }
+        }
+        
+        // Average with rounding
+        std::int32_t avg = (sum + (H * W / 2)) / (H * W);
+        
+        // Saturate
+        if (avg > 127) avg = 127;
+        if (avg < -128) avg = -128;
+        
+        output[c] = static_cast<std::int8_t>(avg);
+    }
 }
 
-float compute_mae_int8(const int8_t* expected, const int8_t* actual, size_t size) {
-    // TODO: Implement
+//==============================================================================
+// Convolution (simplified - direct method with 6 nested loops)
+//==============================================================================
+// 
+// This is the "simple" version:
+// - Easy to understand
+// - Directly computes convolution with nested loops
+// - Slow due to poor cache performance
+// - Good for reference/verification
+//
+// Loop structure:
+// 1. c_out: output channel (which filter we're applying)
+// 2. oh, ow: output position (where in output we're writing)
+// 3. c_in: input channel (sum contributions from all input channels)
+// 4. kh, kw: kernel position (slide kernel over input)
+//
+//==============================================================================
+
+void conv2d_int8_simple(const std::int8_t* input, const std::int8_t* weight,
+                        const std::int32_t* bias, std::int32_t* output,
+                        std::size_t C_in, std::size_t H, std::size_t W,
+                        std::size_t C_out, std::size_t K,
+                        std::size_t stride, std::size_t padding) {
+    
+    // Calculate output size
+    std::size_t H_out = (H + 2 * padding - K) / stride + 1;
+    std::size_t W_out = (W + 2 * padding - K) / stride + 1;
+    
+    // Loop 1: For each output channel (each filter)
+    for (std::size_t c_out = 0; c_out < C_out; ++c_out) {
+        
+        // Loop 2 & 3: For each output position
+        for (std::size_t oh = 0; oh < H_out; ++oh) {
+            for (std::size_t ow = 0; ow < W_out; ++ow) {
+                
+                // Start with bias
+                std::int32_t acc = bias ? bias[c_out] : 0;
+                
+                // Loop 4: For each input channel
+                for (std::size_t c_in = 0; c_in < C_in; ++c_in) {
+                    
+                    // Loop 5 & 6: Slide kernel over input
+                    for (std::size_t kh = 0; kh < K; ++kh) {
+                        for (std::size_t kw = 0; kw < K; ++kw) {
+                            
+                            // Find input position
+                            std::int64_t ih = oh * stride + kh - padding;
+                            std::int64_t iw = ow * stride + kw - padding;
+                            
+                            // Skip if outside input (padding = 0)
+                            if (ih < 0 || ih >= (std::int64_t)H || 
+                                iw < 0 || iw >= (std::int64_t)W) {
+                                continue;
+                            }
+                            
+                            // Get input and weight values
+                            std::int8_t in_val = input[c_in * H * W + ih * W + iw];
+                            std::int8_t wt_val = weight[((c_out * C_in + c_in) * K + kh) * K + kw];
+                            
+                            // Multiply and add
+                            acc += (std::int32_t)in_val * (std::int32_t)wt_val;
+                        }
+                    }
+                }
+                
+                // Store result
+                output[c_out * H_out * W_out + oh * W_out + ow] = acc;
+            }
+        }
+    }
+}
+
+//==============================================================================
+// Convolution (optimized im2col + GEMM version)
+//==============================================================================
+//
+// im2col approach:
+// 1. Reorganize input patches into columns (im2col)
+// 2. Reshape weights into a 2D matrix
+// 3. Perform matrix multiplication (GEMM)
+// 4. Result is the convolution output
+//
+// Why faster?
+// - Matrix multiplication is highly optimized (SIMD, cache-friendly)
+// - Avoids redundant memory accesses
+// - Can use optimized BLAS libraries
+//
+//==============================================================================
+
+// Helper function: im2col - transform input patches into columns
+void im2col_int8(const std::int8_t* input,
+                 std::int8_t* col_buffer,
+                 std::size_t C_in, std::size_t H, std::size_t W,
+                 std::size_t K, std::size_t stride, std::size_t padding,
+                 std::size_t H_out, std::size_t W_out) {
+    // col_buffer shape: [C_in * K * K] x [H_out * W_out]
+    // Each column is one flattened patch of the input
+    
+    std::size_t col_idx = 0;  // Column index in output
+    
+    // For each output position
+    for (std::size_t oh = 0; oh < H_out; ++oh) {
+        for (std::size_t ow = 0; ow < W_out; ++ow) {
+            std::size_t row_idx = 0;  // Row index in output
+            
+            // For each input channel
+            for (std::size_t c_in = 0; c_in < C_in; ++c_in) {
+                // For each kernel position
+                for (std::size_t kh = 0; kh < K; ++kh) {
+                    for (std::size_t kw = 0; kw < K; ++kw) {
+                        // Calculate input position
+                        std::int64_t h = oh * stride + kh - padding;
+                        std::int64_t w = ow * stride + kw - padding;
+                        
+                        // Get value (0 if out of bounds = padding)
+                        std::int8_t val = 0;
+                        if (h >= 0 && h < static_cast<std::int64_t>(H) && 
+                            w >= 0 && w < static_cast<std::int64_t>(W)) {
+                            val = input[c_in * H * W + h * W + w];
+                        }
+                        
+                        // Store in col_buffer
+                        // Layout: col_buffer[row_idx * (H_out * W_out) + col_idx]
+                        col_buffer[row_idx * (H_out * W_out) + col_idx] = val;
+                        row_idx++;
+                    }
+                }
+            }
+            col_idx++;
+        }
+    }
+}
+
+// Full im2col convolution
+void conv2d_int8_im2col(const std::int8_t* input, const std::int8_t* weight,
+                        const std::int32_t* bias, std::int32_t* output,
+                        std::size_t C_in, std::size_t H, std::size_t W,
+                        std::size_t C_out, std::size_t K,
+                        std::size_t stride, std::size_t padding) {
+    // Calculate output dimensions
+    std::size_t H_out = (H + 2 * padding - K) / stride + 1;
+    std::size_t W_out = (W + 2 * padding - K) / stride + 1;
+    
+    // Allocate im2col buffer
+    // Shape: [C_in * K * K] x [H_out * W_out]
+    std::size_t col_rows = C_in * K * K;      // Flattened patch size
+    std::size_t col_cols = H_out * W_out;     // Number of patches
+    std::vector<std::int8_t> col_buffer(col_rows * col_cols);
+    
+    // Step 1: Transform input using im2col
+    im2col_int8(input, col_buffer.data(), C_in, H, W, K, stride, padding, H_out, W_out);
+    
+    // Step 2: Matrix multiplication
+    // Weight shape: [C_out] x [C_in * K * K]
+    // Col buffer shape: [C_in * K * K] x [H_out * W_out]
+    // Output shape: [C_out] x [H_out * W_out]
     //
-    // float total_error = 0.0f;
-    // for (size_t i = 0; i < size; i++) {
-    //     total_error += std::abs(static_cast<float>(expected[i] - actual[i]));
-    // }
-    // return total_error / size;
-    return 0.0f;
+    // This is: output = weight × col_buffer
+    
+    for (std::size_t c_out = 0; c_out < C_out; ++c_out) {
+        for (std::size_t col = 0; col < col_cols; ++col) {
+            // Start with bias
+            std::int32_t acc = bias ? bias[c_out] : 0;
+            
+            // Dot product of weight row and col_buffer column
+            for (std::size_t k = 0; k < col_rows; ++k) {
+                std::int8_t wt_val = weight[c_out * col_rows + k];
+                std::int8_t in_val = col_buffer[k * col_cols + col];
+                acc += static_cast<std::int32_t>(wt_val) * static_cast<std::int32_t>(in_val);
+            }
+            
+            // Store result
+            output[c_out * col_cols + col] = acc;
+        }
+    }
 }
 
 } // namespace golden
+} // namespace resnet_accel
