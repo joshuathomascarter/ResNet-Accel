@@ -89,6 +89,7 @@ struct BSRMatrix {
         return static_cast<float>(dense_bytes) / static_cast<float>(bsr_bytes);
     }
 };
+
 //==============================================================================
 // Validation Result Structure
 //==============================================================================
@@ -199,7 +200,7 @@ inline BSRMatrix pack_to_bsr(const std::int8_t* dense,
         std::size_t row_start = br * BSR_BLOCK_SIZE;
         std::size_t block_rows = std::min(BSR_BLOCK_SIZE, rows - row_start);
         
-        for (std::size_t bc = 0; bc < bsr.num_block_cols; ++br) {
+        for (std::size_t bc = 0; bc < bsr.num_block_cols; ++bc) {  // FIX: ++bc not ++br
             std::size_t col_start = bc * BSR_BLOCK_SIZE;
             std::size_t block_cols = std::min(BSR_BLOCK_SIZE, cols - col_start);
             
@@ -216,11 +217,11 @@ inline BSRMatrix pack_to_bsr(const std::int8_t* dense,
                             dst[i * BSR_BLOCK_SIZE + j] = src[i * cols + j];
                         } else {
                             dst[i * BSR_BLOCK_SIZE + j] = 0;
-                        
+                        }
                     }
                 }
+                ++block_idx;  // FIX: Only increment when storing non-zero block
             }
-            ++block_idx;
         }
     }
     
@@ -319,7 +320,7 @@ inline std::size_t get_dense_memory_bytes(const BSRMatrix& bsr) {
  */
 inline std::size_t get_hardware_memory_bytes(const BSRMatrix& bsr) {
     return 12 +  // Header
-           (bsr.num_block_rows + 1) * 2 +  // row_ptr as uint16
+           (bsr.num_block_rows + 1) * 2 +
            bsr.nnz_blocks * 2 +  // col_idx as uint16
            bsr.nnz_blocks * BSR_BLOCK_ELEMENTS;  // Block data
 }

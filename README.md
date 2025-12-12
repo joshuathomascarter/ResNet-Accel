@@ -1,13 +1,43 @@
 # ACCEL-v1: Sparse CNN Accelerator for FPGA
 
-**A research FPGA accelerator for sparse neural networks targeting Zynq-7020.**  
-Built from scratch (Sept–Dec 2025). Implements weight-stationary systolic arrays with BSR sparse format.
+<div align="center">
 
-> **Status**: RTL complete, simulation verified. Python tooling functional. **C++ host driver in planning phase.**
+**16×16 Weight-Stationary Systolic Array with BSR Sparse Acceleration**
+
+[![GitHub stars](https://img.shields.io/github/stars/joshuathomascarter/ResNet-Accel?style=social)](https://github.com/joshuathomascarter/ResNet-Accel)
+![RTL](https://img.shields.io/badge/RTL-SystemVerilog-blue)
+![Target](https://img.shields.io/badge/Target-Zynq%20Z7020-green)
+![Status](https://img.shields.io/badge/Status-Simulation%20Verified-yellow)
+
+</div>
 
 ---
 
-## Performance Targets (Simulation-Based)
+## 🎯 What is This?
+
+A complete **sparse neural network accelerator** built from scratch, targeting the Xilinx Zynq-7020 FPGA. Implements:
+
+- **16×16 systolic array** with weight-stationary dataflow
+- **BSR (Block Sparse Row) format** that skips zero weight blocks entirely
+- **INT8 quantization** pipeline with per-channel scaling
+- **Full software stack**: Python training/export + C++ host driver
+
+```
+                    Activations (INT8)
+                    ↓   ↓   ↓   ↓
+              ┌───────────────────────┐
+  Weights ───▶│   16×16 Systolic      │───▶ Outputs (INT32)
+  (BSR INT8)  │   Array (256 MACs)    │     
+              │   @ 200 MHz           │     Throughput: 51 GOPS (dense)
+              └───────────────────────┘                 170 GOPS (70% sparse)
+```
+
+> **Status**: RTL complete, simulation verified, Python tooling functional.  
+> **Next**: FPGA deployment on PYNQ-Z2 (Christmas 2025)
+
+---
+
+## 📊 Performance Targets
 
 | Metric | Target | Notes |
 |--------|--------|-------|
@@ -316,13 +346,66 @@ wire [7:0] saturated = (scaled > 127) ? 8'd127 :
 
 | Document | Description |
 |----------|-------------|
+| **[hw/README.md](hw/README.md)** | **Hardware architecture, diagrams, Zynq deployment guide** |
+| **[docs/DEEP_DIVE.md](docs/DEEP_DIVE.md)** | **Performance analysis, ResNet-18 breakdown, timing** |
 | [Architecture Overview](docs/architecture/ARCHITECTURE.md) | System design, dataflow, memory hierarchy |
 | [BSR Format Spec](docs/architecture/SPARSITY_FORMAT.md) | Sparse format details, hardware FSM |
 | [Power Optimization](docs/guides/POWER_OPTIMIZATION_ADVANCED.md) | 5-phase optimization (2.0W -> 840mW) |
 | [Quantization Guide](docs/guides/QUANTIZATION_PRACTICAL.md) | INT8 training, per-channel quantization |
 | [Simulation Guide](docs/guides/SIMULATION_GUIDE.md) | Verilator setup, testbench usage |
 | [FPGA Deployment](docs/guides/FPGA_DEPLOYMENT.md) | Vivado synthesis, bitstream generation |
-| [Verification Report](docs/verification/VERIFICATION.md) | Test coverage, CocoTB tests |
+
+---
+
+## 🎄 Zynq Z2 Deployment (December 2025)
+
+**Target Board**: PYNQ-Z2 (Xilinx XC7Z020-1CLG400C)
+
+### Resource Estimates
+
+| Resource | Used | Available | Utilization |
+|----------|------|-----------|-------------|
+| LUTs | ~18K | 53,200 | 34% |
+| FFs | ~12K | 106,400 | 11% |
+| BRAM | 64 | 140 | 46% |
+| DSP48 | 196* | 220 | 89% |
+
+*Using 14×14 array to fit DSP constraints
+
+### Quick Deploy
+
+```bash
+# 1. Synthesize
+cd hw && vivado -mode batch -source scripts/build.tcl
+
+# 2. Copy to board
+scp build/accel_top.bit xilinx@pynq:/home/xilinx/
+
+# 3. Run inference
+python3 -c "
+from pynq import Overlay
+ol = Overlay('accel_top.bit')
+print('Accelerator loaded!')
+"
+```
+
+See **[hw/README.md](hw/README.md)** for full deployment guide.
+
+---
+
+## License
+
+MIT License - See [LICENSE](LICENSE) for details.
+
+---
+
+<div align="center">
+
+**Built with ❤️ in Montreal**
+
+*A learning project that became something real*
+
+</div>
 | [Project Timeline](docs/project/EXECUTION_SUMMARY.md) | 7-month development log |
 
 ## License
