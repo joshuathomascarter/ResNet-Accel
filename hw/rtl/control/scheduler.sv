@@ -1,28 +1,106 @@
-//------------------------------------------------------------------------------
-// scheduler.v
-// Tiled WS (Weight-Stationary) GEMM scheduler for systolic array
+// =============================================================================
+// scheduler.sv — Tiled Weight-Stationary GEMM Scheduler for Systolic Array
+// =============================================================================
 //
-// Responsibilities:
-//  - Implements tile loop-nest over (m_tile, n_tile, k_tile)
-//  - Drives buffers/array: clr, en, rd_en, k_idx, bank_sel_rd_A/B
-//  - Honors 1-cycle SRAM read latency (see PREPRIME parameter)
-//  - Generates row/col enable masks for edge tiles (Tm_eff/Tn_eff)
-//  - Ping/Pong bank policy: k_tile parity
-//  - Status + perf: busy, done_tile, tile coords, cycles, stall_cycles
+// OVERVIEW
+// ========
+// This is the BRAIN of the accelerator. It orchestrates all computation by:
+//   1. Managing the 3-level tile loop: (m_tile, n_tile, k_tile)
+//   2. Controlling weight loading and activation streaming (Weight-Stationary)
+//   3. Generating buffer addresses and bank selection (ping-pong)
+//   4. Producing per-PE enable masks for edge tile handling
+//   5. Tracking performance counters for optimization analysis
 //
-// Engineer's Note:
-//  - This module orchestrates the entire compute flow.
-//  - It assumes a "Double Buffering" scheme (Ping/Pong) for A and B buffers.
-//  - The 'load_weight' signal is critical for the Weight-Stationary dataflow.
-//    It must be asserted during the 'LOAD' state to latch weights into PEs.
+// WEIGHT-STATIONARY DATAFLOW
+// ==========================
+// In Weight-Stationary (WS) dataflow, weights stay fixed in PEs while
+// activations stream through. This is optimal for our use case because:
+//   - Weights are reused across many activations (CNN feature maps)
+//   - Reduces weight buffer bandwidth by loading once per tile
+//   - Each PE's weight register holds one INT8 value throughout compute
 //
-// Latency note (per tile, ideal):
-//   cycles_tile ≈ Tk_eff + (Tm-1) + (Tn-1)
-//   +1 cycle bubble if PREPRIME=0 (documented below)
+// OPERATION SEQUENCE (per output tile):
 //
-// Copyright:
-//   Accel v1 (INT8 GEMM IP). MIT/Apache as you choose.
-//------------------------------------------------------------------------------
+//   ┌─────────────┐
+//   │  S_IDLE     │ ← Wait for start signal
+//   └─────┬───────┘
+//         ▼
+//   ┌─────────────┐
+//   │ S_PREP_TILE │ ← Clear accumulators, reset counters
+//   └─────┬───────┘
+//         ▼
+//   ┌─────────────┐
+//   │S_WAIT_READY │ ← Wait for DMA to fill ping/pong buffers
+//   └─────┬───────┘
+//         ▼
+//   ┌─────────────────┐
+//   │ S_LOAD_WEIGHT   │ ← Load Tk weights into PE registers (load_weight=1)
+//   └─────┬───────────┘
+//         ▼
+//   ┌─────────────────┐
+//   │ S_STREAM_K      │ ← Stream Tk activations, weights stationary (en=1)
+//   └─────┬───────────┘
+//         │ ← Loop for all k_tiles
+//         ▼
+//   ┌─────────────┐
+//   │ S_TILE_DONE │ ← Advance m/n indices, signal completion
+//   └─────┬───────┘
+//         │ ← Loop for all m,n tiles
+//         ▼
+//   ┌─────────────┐
+//   │  S_DONE     │ ← All tiles complete
+//   └─────────────┘
+//
+// TILING STRATEGY
+// ===============
+// For GEMM: C[M×N] = A[M×K] × B[K×N]
+// We tile as: C[Tm×Tn] = A[Tm×Tk] × B[Tk×Tn]
+//
+// Example: 1024×1024 × 1024×1024 with Tm=Tn=Tk=14:
+//   MT = ceil(1024/14) = 74 output row tiles
+//   NT = ceil(1024/14) = 74 output col tiles
+//   KT = ceil(1024/14) = 74 K-dimension tiles
+//   Total: 74 × 74 × 74 = 405,224 tile operations
+//
+// EDGE TILE HANDLING
+// ==================
+// When M, N, or K is not a multiple of tile size, edge tiles are smaller.
+// This module generates enable masks to disable unused rows/columns:
+//   en_mask_row[i] = 1 if row i is within Tm_eff
+//   en_mask_col[j] = 1 if col j is within Tn_eff
+//
+// Example: M=10, Tm=4 → Tiles are [4,4,2], last tile has Tm_eff=2
+//
+// DOUBLE-BUFFERING (PING-PONG)
+// ============================
+// Buffer bank selection alternates based on k_tile parity:
+//   k_tile even → bank_sel = 0 (ping)
+//   k_tile odd  → bank_sel = 1 (pong)
+//
+// While systolic array reads from one bank, DMA fills the other:
+//   Cycle 0-N:   Array reads Bank 0, DMA fills Bank 1
+//   Cycle N+1:   Array reads Bank 1, DMA fills Bank 0
+//
+// PREPRIME OPTION
+// ===============
+// SRAM has 1-cycle read latency. PREPRIME parameter handles this:
+//   PREPRIME=0: Accept 1-cycle bubble at start of S_STREAM_K (simpler)
+//   PREPRIME=1: Issue dummy read in S_PREPRIME to pre-fill pipeline
+//
+// PERFORMANCE COUNTERS
+// ====================
+// cycles_tile:  Cycles spent in active compute (S_STREAM_K)
+// stall_cycles: Cycles waiting for DMA (S_WAIT_READY)
+// Use ratio = cycles_tile / (cycles_tile + stall_cycles) for efficiency
+//
+// MAGIC NUMBERS
+// =============
+// MAX_TM/MAX_TN = 64: Maximum tile dimensions (determines mask width)
+// ADDR_W = 10: Buffer address width (1024 entries max)
+// 200 mW: Power savings from clock gating when idle
+// 8-bit one-hot state: 8 states for FSM (easy debug, fast decode)
+//
+// =============================================================================
 
 module scheduler #(
   // Dimension widths (log2 maxima)

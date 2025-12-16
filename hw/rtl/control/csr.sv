@@ -1,12 +1,116 @@
-// -----------------------------------------------------------------------------
-// csr.v — Accel v1 Control/Status (single source of truth)
-// -----------------------------------------------------------------------------
+// =============================================================================
+// csr.sv — Accelerator Control/Status Register Block
+// =============================================================================
+//
+// OVERVIEW
+// ========
+// This module implements the Control/Status Register (CSR) block, providing
+// the software interface between the ARM CPU and the accelerator hardware.
+// It is the single source of truth for all accelerator configuration and status.
+//
+// HOST-ACCELERATOR INTERFACE
+// ==========================
+//
+//   ┌─────────────────┐                      ┌─────────────────┐
+//   │   ARM CPU       │    AXI-Lite Bus      │   CSR Block     │
+//   │   (PS)          │ ──────────────────── │   (This Module) │
+//   └─────────────────┘                      └────────┬────────┘
+//                                                     │
+//           ┌─────────────────────────────────────────┴───────────┐
+//           │                                                      │
+//           ▼                                                      ▼
+//   ┌───────────────┐                                    ┌───────────────┐
+//   │   Scheduler   │                                    │     DMA       │
+//   │  (start,dims) │                                    │  (src,len)    │
+//   └───────────────┘                                    └───────────────┘
+//
+// ADDRESS MAP (256 bytes, 8-bit addressing)
+// ==========================================
+// The address map is organized into logical groups:
+//
+// ┌───────────┬──────────────┬────────────────────────────────────────────┐
+// │  Address  │    Name      │              Description                   │
+// ├───────────┼──────────────┼────────────────────────────────────────────┤
+// │ CONTROL & CONFIGURATION (0x00 - 0x3C)                                 │
+// ├───────────┼──────────────┼────────────────────────────────────────────┤
+// │   0x00    │    CTRL      │ [0]=start(W1P) [1]=abort(W1P) [2]=irq_en   │
+// │   0x04    │    DIMS_M    │ Matrix M dimension                         │
+// │   0x08    │    DIMS_N    │ Matrix N dimension                         │
+// │   0x0C    │    DIMS_K    │ Matrix K dimension                         │
+// │   0x10    │    TILES_Tm  │ Tile size M (14 for our array)             │
+// │   0x14    │    TILES_Tn  │ Tile size N (14 for our array)             │
+// │   0x18    │    TILES_Tk  │ Tile size K (14 for our array)             │
+// │   0x1C    │    INDEX_m   │ Current M tile index                       │
+// │   0x20    │    INDEX_n   │ Current N tile index                       │
+// │   0x24    │    INDEX_k   │ Current K tile index                       │
+// │   0x28    │    BUFF      │ [0]=wr_bank_A [1]=wr_bank_B [8:9]=rd(RO)   │
+// │   0x2C    │    SCALE_Sa  │ Activation scale (float32 bits)            │
+// │   0x30    │    SCALE_Sw  │ Weight scale (float32 bits)                │
+// │   0x3C    │    STATUS    │ [0]=busy(RO) [1]=done(W1C) [9]=err(W1C)    │
+// ├───────────┼──────────────┼────────────────────────────────────────────┤
+// │ PERFORMANCE COUNTERS (0x40 - 0x5C)                                    │
+// ├───────────┼──────────────┼────────────────────────────────────────────┤
+// │   0x40    │  PERF_TOTAL  │ Total cycles from start to done (RO)       │
+// │   0x44    │  PERF_ACTIVE │ Cycles with busy=1 (RO)                    │
+// │   0x48    │  PERF_IDLE   │ Cycles with busy=0 (RO)                    │
+// │   0x4C    │  CACHE_HITS  │ BSR metadata cache hits (RO)               │
+// │   0x50    │  CACHE_MISS  │ BSR metadata cache misses (RO)             │
+// │   0x54    │  DECODE_CNT  │ BSR decode operations (RO)                 │
+// ├───────────┼──────────────┼────────────────────────────────────────────┤
+// │ RESULT REGISTERS (0x80 - 0x8C)                                        │
+// ├───────────┼──────────────┼────────────────────────────────────────────┤
+// │   0x80    │   RESULT_0   │ Output word 0 (debug/test)                 │
+// │   0x84    │   RESULT_1   │ Output word 1                              │
+// │   0x88    │   RESULT_2   │ Output word 2                              │
+// │   0x8C    │   RESULT_3   │ Output word 3                              │
+// ├───────────┼──────────────┼────────────────────────────────────────────┤
+// │ DMA CONTROL (0x90 - 0xBC)                                             │
+// ├───────────┼──────────────┼────────────────────────────────────────────┤
+// │   0x90    │  DMA_SRC     │ BSR weight source address in DDR           │
+// │   0x94    │  DMA_DST     │ Destination buffer select                  │
+// │   0x98    │  DMA_LEN     │ Transfer length in bytes                   │
+// │   0x9C    │  DMA_CTRL    │ [0]=start(W1P) [1]=busy(RO) [2]=done(W1C)  │
+// │   0xA0    │  ACT_SRC     │ Activation source address in DDR           │
+// │   0xA4    │  ACT_LEN     │ Activation transfer length                 │
+// │   0xA8    │  ACT_CTRL    │ [0]=start(W1P) [2]=done(W1C)               │
+// │   0xB8    │  BYTES_XFER  │ Bytes transferred (debug)                  │
+// └───────────┴──────────────┴────────────────────────────────────────────┘
+//
+// REGISTER TYPES
+// ==============
+// W1P (Write-1-Pulse):  Writing 1 generates a 1-cycle pulse, reads as 0
+// W1C (Write-1-Clear):  Writing 1 clears the bit, sticky until cleared
+// RO  (Read-Only):      Hardware sets, software can only read
+// RW  (Read-Write):     Normal read/write register
+//
+// MAGIC NUMBERS
+// =============
+// 0xDEAD_BEEF: Returned for invalid address reads (debug aid)
+// 0x3F80_0000: Float32 representation of 1.0 (default scale)
+// ADDR_W = 8:  256-byte address space (64 registers × 4 bytes)
+//
+// CLOCK GATING
+// ============
+// CSR accesses are infrequent. Clock gating saves power when idle.
+// Enabled when: csr_wen | csr_ren | core_done_tile_pulse
+//
+// =============================================================================
 `timescale 1ns/1ps
 `default_nettype none
 
 module csr #(
-  parameter ADDR_W = 8,  // 256B map
-  parameter ENABLE_CLOCK_GATING = 1
+    // =========================================================================
+    // PARAMETER: ADDR_W - CSR Address Width
+    // =========================================================================
+    // 8 bits = 256-byte address space (64 × 32-bit registers).
+    // Increase if more registers are needed.
+    parameter ADDR_W = 8,
+    
+    // =========================================================================
+    // PARAMETER: ENABLE_CLOCK_GATING
+    // =========================================================================
+    // Gate CSR clock when not accessed to save power.
+    parameter ENABLE_CLOCK_GATING = 1
 )(
   input  wire              clk,
   input  wire              rst_n,
