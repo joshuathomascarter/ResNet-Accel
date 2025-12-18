@@ -80,6 +80,23 @@ class CSRMap:
     ACT_DMA_SRC_ADDR = 0xA0  # Activation DMA source address
     ACT_DMA_LEN      = 0xA4  # Activation DMA length
     ACT_DMA_CTRL     = 0xA8  # Activation DMA control
+    
+    # BSR / Hybrid Scheduler registers (0xC0 - 0xDF)
+    # The accelerator has two schedulers sharing the same 14×14 systolic array:
+    #   - BSR Scheduler: For sparse layers with BSR weights
+    #   - Dense Scheduler: For FC layers (100% dense)
+    # BSR_CONFIG[0] selects which scheduler: 0=BSR, 1=Dense
+    BSR_CONFIG       = 0xC0  # Scheduler mode & BSR config
+    BSR_NUM_BLOCKS   = 0xC4  # Number of non-zero BSR blocks
+    BSR_BLOCK_ROWS   = 0xC8  # Block grid rows
+    BSR_BLOCK_COLS   = 0xCC  # Block grid columns
+    BSR_STATUS       = 0xD0  # BSR engine status
+    BSR_PTR_ADDR     = 0xD8  # row_ptr array address
+    BSR_IDX_ADDR     = 0xDC  # col_idx array address
+    
+    # BSR_CONFIG bits
+    SCHED_MODE_BSR   = 0      # Use BSR sparse scheduler
+    SCHED_MODE_DENSE = 1 << 0 # Use Dense GEMM scheduler
 
 
 class AccelDriver:
@@ -362,6 +379,25 @@ class AccelDriver:
         
         self._csr_write(CSRMap.SCALE_Sa, Sa_fixed)
         self._csr_write(CSRMap.SCALE_Sw, Sw_fixed)
+    
+    def set_scheduler_mode(self, use_dense: bool):
+        """
+        Set scheduler mode for hybrid scheduler architecture.
+        
+        The accelerator has two schedulers sharing the same 14×14 systolic array:
+          - BSR Scheduler: Optimized for Block Sparse Row format weights
+          - Dense Scheduler: Traditional tiled GEMM for fully-connected layers
+        
+        Args:
+            use_dense: True = Dense scheduler (for FC layers like FC1)
+                       False = BSR scheduler (for sparse conv layers)
+        """
+        bsr_config = self._csr_read(CSRMap.BSR_CONFIG)
+        if use_dense:
+            bsr_config |= CSRMap.SCHED_MODE_DENSE  # Set bit 0
+        else:
+            bsr_config &= ~CSRMap.SCHED_MODE_DENSE  # Clear bit 0
+        self._csr_write(CSRMap.BSR_CONFIG, bsr_config)
     
     # =========================================================================
     # Private methods

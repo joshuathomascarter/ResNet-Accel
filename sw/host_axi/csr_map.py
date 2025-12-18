@@ -38,6 +38,40 @@ PERF_TOTAL = 0x40  #: Total cycles from start to done
 PERF_ACTIVE = 0x44  #: Cycles where busy was high
 PERF_IDLE = 0x48  #: Cycles where busy was low
 
+# ---------------------------------------------------------------------------
+# BSR / HYBRID SCHEDULER REGISTERS (0xC0 - 0xDF)
+# ---------------------------------------------------------------------------
+# These registers control the BSR sparse format and scheduler mode selection.
+# The accelerator has two schedulers sharing the same 14×14 systolic array:
+#   - BSR Scheduler (bsr_scheduler.sv): For sparse layers with BSR weights
+#   - Dense Scheduler (scheduler.sv): For fully-connected layers (100% dense)
+#
+# BSR_CONFIG[0] selects which scheduler drives the compute:
+#   0 = BSR sparse scheduler
+#   1 = Dense GEMM scheduler
+
+BSR_CONFIG = 0xC0       #: BSR configuration/scheduler mode select
+BSR_NUM_BLOCKS = 0xC4   #: Number of non-zero BSR blocks
+BSR_BLOCK_ROWS = 0xC8   #: Block grid rows
+BSR_BLOCK_COLS = 0xCC   #: Block grid columns
+BSR_STATUS = 0xD0       #: BSR engine status
+BSR_ERROR_CODE = 0xD4   #: BSR error code (RO)
+BSR_PTR_ADDR = 0xD8     #: row_ptr array DRAM address
+BSR_IDX_ADDR = 0xDC     #: col_idx array DRAM address
+
+# BSR_CONFIG bits
+BSR_CONFIG_SCHED_MODE = 1 << 0   #: Scheduler mode: 0=BSR, 1=Dense
+BSR_CONFIG_MODE_BSR = 0         #: Use BSR sparse scheduler
+BSR_CONFIG_MODE_DENSE = 1 << 0  #: Use Dense GEMM scheduler
+BSR_CONFIG_VERIFY = 1 << 1      #: Enable verification (legacy)
+BSR_CONFIG_ZERO_SKIP = 1 << 2   #: Enable zero-skip (legacy)
+
+# BSR_STATUS bits
+BSR_STATUS_READY = 1 << 0   #: BSR engine ready
+BSR_STATUS_BUSY = 1 << 1    #: BSR engine busy
+BSR_STATUS_DONE = 1 << 2    #: BSR operation complete
+BSR_STATUS_ERROR = 1 << 3   #: BSR error flag
+
 # CTRL bits
 CTRL_START = 1 << 0  #: Start pulse (W1P)
 CTRL_ABORT = 1 << 1  #: Abort pulse (W1P)
@@ -77,6 +111,11 @@ CSR_LAYOUT = [
     (DMA_CTRL, "DMA_CTRL", "u32", "BSR DMA: Control (start, reset)"),
     (DMA_COUNT, "DMA_COUNT", "u32", "BSR DMA: Blocks loaded"),
     (DMA_STATUS, "DMA_STATUS", "u32", "BSR DMA status"),
+    (BSR_CONFIG, "BSR_CONFIG", "u32", "BSR config / scheduler mode select"),
+    (BSR_NUM_BLOCKS, "BSR_NUM_BLOCKS", "u32", "Number of non-zero BSR blocks"),
+    (BSR_BLOCK_ROWS, "BSR_BLOCK_ROWS", "u32", "Block grid rows"),
+    (BSR_BLOCK_COLS, "BSR_BLOCK_COLS", "u32", "Block grid columns"),
+    (BSR_STATUS, "BSR_STATUS", "u32", "BSR engine status"),
 ]
 
 FIELD_TYPES = {
